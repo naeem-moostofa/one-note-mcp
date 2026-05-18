@@ -16,7 +16,7 @@
 | PyJWT | Minting and validating app-level JWTs for web UI sessions |
 | uvicorn | ASGI server |
 | python-dotenv | Local `.env` loading |
-| EasyOCR | Handwriting OCR — self-hosted, pip installable, containerisable, ~80-95% accuracy on clear handwriting. Upgrade path: TrOCR (Microsoft HuggingFace) if accuracy on real OneNote samples is insufficient |
+| Surya OCR | Handwriting OCR — self-hosted, pip installable, containerisable, ~80-95% accuracy on clear handwriting. Upgrade path: TrOCR (Microsoft HuggingFace) if accuracy on real OneNote samples is insufficient |
 
 Architecture layers (service/repository/API separation):
 ```
@@ -52,7 +52,7 @@ Goal: a fully working backend running on `localhost:8000` connected to a local D
 - JWT auth middleware
 - Microsoft OAuth flow (login + callback)
 - Notebooks, MCP connections, and sync status API endpoints
-- Sync command (`python -m sync.run`) — traverses Graph API, extracts text, runs EasyOCR on handwritten pages, writes combined content to DB
+- Sync command (`python -m sync.run`) — traverses Graph API, extracts text, runs Surya OCR on handwritten pages, writes combined content to DB
 - FastMCP server mounted into FastAPI — search, get page, get page image, list notebooks tools
 
 ---

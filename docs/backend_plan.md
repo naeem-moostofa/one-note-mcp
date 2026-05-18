@@ -142,7 +142,7 @@ Wraps MSAL Python. Handles token acquisition and cache serialisation.
 **Note:** After every silent token acquisition MSAL may internally rotate the refresh token. The updated serialised cache must be saved back to the DB even if nothing else changed — otherwise the next acquisition will fail.
 
 ### `clients/ocr_client.py`
-Wraps EasyOCR. Accepts a page image and returns extracted text.
+Wraps Surya OCR. Accepts a page image and returns extracted text.
 
 - Run OCR on a page image
 - Returns empty string if no text is detected (not an error)
@@ -254,12 +254,12 @@ For each active microsoft_connection:
 
 ### Prerequisites
 - Python 3.11+
-- [Poetry](https://python-poetry.org/docs/#installation)
+- [uv](https://docs.astral.sh/uv/)
 - Docker Desktop
 
 ### 1. Install dependencies
 ```bash
-poetry install
+uv sync
 ```
 
 ### 2. Environment variables

@@ -1,24 +1,31 @@
-[tool.poetry]
+[project]
 name = "onenote-mcp"
 version = "0.1.0"
-description = ""
-authors = []
-package-mode = false
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "fastmcp",
+    "sqlalchemy[asyncio]",
+    "asyncpg",
+    "alembic",
+    "msal",
+    "cryptography",
+    "pyjwt",
+    "uvicorn[standard]",
+    "python-dotenv",
+    "greenlet",
+    "pydantic-settings",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "*"
-fastmcp = "*"
-sqlalchemy = {extras = ["asyncio"], version = "*"}
-asyncpg = "*"
-alembic = "*"
-msal = "*"
-cryptography = "*"
-pyjwt = "*"
-uvicorn = {extras = ["standard"], version = "*"}
-python-dotenv = "*"
-easyocr = "*"
+[project.optional-dependencies]
+ocr = [
+    "surya-ocr",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+exclude-newer = "1 week"
