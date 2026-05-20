@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import MicrosoftConnectionStatus, NotebookSyncStatus, PageSyncStatus
 
@@ -173,3 +173,61 @@ class PageSearchQuery(BaseModel):
     limit: int
     offset: int = 0
     notebook_ids: list[int]
+
+
+# --- Client schemas ---
+
+class MSALIDTokenClaims(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    oid: str
+    preferred_username: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+
+
+class MSALAuthCodeFlow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    auth_uri: str
+    state: str
+
+
+class MSALTokenResult(BaseModel):
+    access_token: str
+    id_token_claims: MSALIDTokenClaims
+    serialized_cache: str
+
+
+class MSALSilentTokenResult(BaseModel):
+    access_token: str
+    serialized_cache: str
+
+
+class GraphNotebook(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    display_name: str = Field(alias="displayName")
+    last_modified_datetime: datetime = Field(alias="lastModifiedDateTime")
+
+
+class GraphSection(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    display_name: str = Field(alias="displayName")
+
+
+class GraphPage(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    title: Optional[str] = None
+    last_modified_datetime: datetime = Field(alias="lastModifiedDateTime")
+
+
+class GraphPageContent(BaseModel):
+    html: str
+    base_images: list[bytes]
+    ink_image: bytes | None

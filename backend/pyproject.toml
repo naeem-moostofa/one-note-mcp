@@ -15,10 +15,9 @@ dependencies = [
     "python-dotenv",
     "greenlet",
     "pydantic-settings",
-]
-
-[project.optional-dependencies]
-ocr = [
+    "httpx",
+    "tenacity",
+    "pillow",
     "surya-ocr",
 ]
 
