@@ -18,7 +18,8 @@ dependencies = [
     "httpx",
     "tenacity",
     "pillow",
-    "surya-ocr",
+    "google-cloud-vision",
+    "beautifulsoup4",
 ]
 
 [build-system]

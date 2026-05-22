@@ -118,11 +118,19 @@ erDiagram
 | section_id | FK — pages belong to a section, which belongs to a notebook |
 | onenote_id | Graph API identifier for the page. Used to fetch content and images. Unique per user |
 | title | Included in MCP search results so the model knows which page a result came from |
-| content | Combined text written by the sync job: typed text extracted from page HTML, concatenated with OCR text for pages with handwriting |
+| content | Combined text written by the sync job: typed text extracted from page HTML, interleaved with OCR text for pages with handwriting in the page's visual order. Kept as a single column because typed text and handwriting on real OneNote pages are spatially interleaved — splitting them into two columns would destroy ordering. Callers are informed via tool descriptions that this field mixes verbatim typed text with best-effort OCR output |
 | search_vector | Pre-computed GIN-indexed `tsvector` over `content`. Makes full-text search a single indexed scan instead of a sequential `to_tsvector()` over all rows |
 | content_hash | SHA-256 of the raw page content fetched from Graph. The sync job skips pages where this matches, avoiding unnecessary reprocessing |
 | sync_status | Lets the MCP server flag stale pages in results |
 | last_synced_at | Records when this page was last fully processed. Compared against Graph API's `lastModifiedDateTime` to detect changes |
+
+### Search Indexes & Extensions
+
+| object | purpose |
+|---|---|
+| `pg_trgm` extension | Enables trigram similarity matching. Required for fuzzy fallback on OCR errors (`painters` ↔ `pointers`, `Ivalve` ↔ `lvalue`) |
+| `ix_pages_search_vector_gin` (GIN on `search_vector`) | Fast full-text search. First-pass match — high precision, fast |
+| `ix_pages_content_trgm` (GIN with `gin_trgm_ops` on `content`) | Trigram index for fuzzy fallback when FTS misses an OCR-garbled term |
 
 ### mcp_connections
 | column | reason |

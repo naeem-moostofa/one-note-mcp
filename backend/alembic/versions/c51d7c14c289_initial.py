@@ -60,7 +60,7 @@ def upgrade() -> None:
     sa.Column('onenote_id', sa.String(), nullable=False),
     sa.Column('display_name', sa.String(), nullable=False),
     sa.Column('sync_enabled', sa.Boolean(), nullable=False),
-    sa.Column('sync_status', sa.Enum('FRESH', 'SYNCING', 'STALE', 'FAILED', 'EXCLUDED', name='notebook_sync_status'), nullable=False),
+    sa.Column('sync_status', sa.Enum('SYNCING', 'FAILED', 'EXCLUDED', name='notebook_sync_status'), nullable=True),
     sa.Column('last_synced_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
@@ -83,8 +83,7 @@ def upgrade() -> None:
     sa.Column('content', sa.Text(), nullable=True),
     sa.Column('search_vector', postgresql.TSVECTOR(), sa.Computed("to_tsvector('english', coalesce(content, ''))", persisted=True), nullable=True),
     sa.Column('content_hash', sa.String(), nullable=True),
-    sa.Column('sync_status', sa.Enum('FRESH', 'SYNCING', 'STALE', 'FAILED', name='page_sync_status'), nullable=False),
-    sa.Column('last_synced_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('sync_status', sa.Enum('SYNCING', 'FAILED', name='page_sync_status'), nullable=True),
     sa.ForeignKeyConstraint(['section_id'], ['sections.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('section_id', 'onenote_id')

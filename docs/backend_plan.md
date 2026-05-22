@@ -79,10 +79,10 @@ All tools check the `sync_status` of the relevant notebooks and pages. If any ar
 
 | tool | description |
 |---|---|
-| `list_notebooks` | Returns notebooks in scope for this MCP connection |
-| `search_pages` | Full-text search over page content, scoped to allowed notebooks. Returns notebook/section/page path plus a content excerpt. Includes staleness note if applicable |
-| `get_page` | Returns the full content of a single page. Includes staleness note if applicable |
-| `get_page_image` | Fetches the page image from Microsoft Graph on demand — intended for handwritten pages where the raw image is more useful than extracted text. Does not run OCR |
+| `list_notebooks` | Returns notebooks in scope for this MCP connection (id, display_name, sync status). Intended as a first call so the caller can pick the right notebook(s) before searching |
+| `search_pages` | Searches page content within the provided notebook scope. Returns matching pages with snippets — short windows of text around each match. Required param: `notebook_ids` (caller chooses scope via `list_notebooks` first — avoids returning irrelevant matches from dozens of notebooks). Optional: `search_size` (chars on each side of match — default 80, max 250), `max_pages` (default 10, max 20), `max_snippets_per_page` (default 5, max 10). Uses Postgres FTS first; falls back to `pg_trgm` similarity for terms FTS misses (handles OCR errors like `painters` ↔ `pointers`). Tool description warns the caller that page content mixes typed text with OCR output — OCR portions may contain recognition errors that should be interpreted semantically. Includes staleness note if applicable |
+| `get_page` | Returns the full `content` of a single page (typed text + OCR text in visual order, as written to the DB by the sync job). Same caveat as `search_pages` — content may contain OCR errors. Includes staleness note if applicable |
+| `get_page_image` | Escape hatch: fetches the rendered composite page image (slide + ink) when text content is insufficient. Returns image content via MCP's `ImageContent` type — FastMCP handles base64 encoding. Intended to be invoked only when the caller explicitly needs to read a page visually (large context cost) |
 | `list_sections` | Returns sections within a notebook in scope |
 
 **Note:** FastMCP is mounted into the same ASGI app as FastAPI. One process, one port, one Railway service. FastAPI handles web routes; FastMCP handles MCP protocol at `/mcp`.
@@ -109,8 +109,19 @@ Services contain all business logic. They call repositories and clients only —
 - Resolve an incoming MCP token: hash it, look it up, validate not revoked, return the connection with its notebook scope
 
 ### `services/search_service.py`
-- Run a full-text search against `pages.search_vector` using a `tsquery`, scoped to the allowed notebook IDs
-- Join through sections to notebook to build the full path (Notebook > Section > Page) returned in results
+
+Accepts: `query`, `notebook_ids` (required, intersected with the MCP connection's allowed scope), `search_size`, `max_pages`, `max_snippets_per_page`.
+
+Algorithm:
+1. **FTS pass** — `to_tsquery` against `pages.search_vector`, scoped to the intersected notebook IDs. Returns matching page IDs with `ts_rank_cd` scores. High precision, fast.
+2. **Trigram fallback** — for query terms that produced no FTS matches (typical for OCR-mangled words), run `similarity(content, term) > threshold` against the same notebook scope. Threshold ~0.3 catches most OCR drift without flooding results. Uses the `ix_pages_content_trgm` index.
+3. **Rank + cap pages** — combine FTS rank and max trigram similarity per page; take top `max_pages` (default 10, max 20).
+4. **Extract snippets per page** — for each top-ranked page, find match offsets in `content`. For each offset, take a window of `search_size` chars (default 80, max 250) on each side.
+5. **Merge overlapping windows** — if two windows overlap or touch, merge into one larger window. Cheaper than returning near-duplicates.
+6. **Cap snippets per page** — take top `max_snippets_per_page` (default 5, max 10) after merging.
+7. **Join through sections to notebook** — return the full path (Notebook > Section > Page) plus the snippet list.
+
+Title is intentionally not weighted into ranking for V1 — small expected gain for added complexity.
 
 ### `services/sync_service.py`
 - Contains all sync logic — calls `graph_client`, `msal_client`, `ocr_client`, and repositories
@@ -142,10 +153,9 @@ Wraps MSAL Python. Handles token acquisition and cache serialisation.
 **Note:** After every silent token acquisition MSAL may internally rotate the refresh token. The updated serialised cache must be saved back to the DB even if nothing else changed — otherwise the next acquisition will fail.
 
 ### `clients/ocr_client.py`
-Wraps Surya OCR. Accepts a page image and returns extracted text.
+Wraps Google Cloud Vision (`DOCUMENT_TEXT_DETECTION`). Authenticated via API key (`GOOGLE_CLOUD_VISION_API_KEY`).
 
-- Run OCR on a page image
-- Returns empty string if no text is detected (not an error)
+- `run_ocr(image_bytes)` — single Vision call per page. Returns extracted text (empty string if none — not an error)
 
 ---
 
@@ -178,8 +188,9 @@ Repositories contain all SQL. They accept primitive types or Pydantic models and
 ### `repositories/page_repository.py`
 - Get page by `onenote_id`
 - Upsert page (create or update)
-- Update content, `content_hash`, `sync_status`, `last_synced_at` after a successful sync
-- Full-text search on `search_vector`
+- Update `content`, `content_hash`, `sync_status`, `last_synced_at` after a successful sync
+- Full-text search on `search_vector` scoped to notebook IDs — returns page IDs + FTS rank scores
+- Trigram fuzzy search on `content` scoped to notebook IDs — returns page IDs + similarity scores. Used as fallback for OCR-mangled terms
 - Get single page by ID
 - Delete pages whose `onenote_id` is no longer returned by Graph
 
@@ -228,10 +239,13 @@ For each active microsoft_connection:
 
             For each page where Graph lastModifiedDateTime > pages.last_synced_at:
                 Fetch page HTML content from Graph
-                Extract typed text from HTML
+                Extract typed text blocks from HTML (in visual order)
                 Check for ink/handwriting nodes in the HTML
-                If handwriting present → fetch page image → run ocr_client
-                Combine typed text + OCR text → write to pages.content
+                If composite needed (images and/or ink present):
+                    Fetch all page images in parallel
+                    Build composite canvas (slide images + ink overlay) — adaptive render scale to stay under Vision's per-image limit
+                    Run a single OCR call against the composite via Vision API → ocr_text
+                Combine typed text + OCR text in visual order → pages.content
                 Update content_hash, sync_status = fresh, last_synced_at = now
 
             On page-level failure → set page sync_status = failed, continue
@@ -243,7 +257,7 @@ For each active microsoft_connection:
 ```
 
 ### Notes
-- `pages.search_vector` is a Postgres generated column — it updates automatically when `content` is written. The sync job does not need to manage it.
+- `pages.search_vector` is a Postgres generated column over `content` — it updates automatically when `content` is written. The sync job does not need to manage it.
 - Graph API results are paginated. `graph_client.py` handles `@odata.nextLink` internally so the sync loop always sees complete results.
 - The sync job continues processing other users/notebooks/pages on failure — a single failure should not abort the whole run.
 - Notebooks are set to `syncing` at the start of the run. If the process crashes mid-run they remain `syncing`, which the MCP treats as stale and includes a note.

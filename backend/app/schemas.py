@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,7 +42,7 @@ class NotebookResponse(BaseModel):
     onenote_id: str
     display_name: str
     sync_enabled: bool
-    sync_status: NotebookSyncStatus
+    sync_status: Optional[NotebookSyncStatus] = None
     last_synced_at: Optional[datetime] = None
 
 
@@ -64,8 +64,7 @@ class PageResponse(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     content_hash: Optional[str] = None
-    sync_status: PageSyncStatus
-    last_synced_at: Optional[datetime] = None
+    sync_status: Optional[PageSyncStatus] = None
 
 
 class PageDetailResponse(BaseModel):
@@ -76,8 +75,7 @@ class PageDetailResponse(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     content_hash: Optional[str] = None
-    sync_status: PageSyncStatus
-    last_synced_at: Optional[datetime] = None
+    sync_status: Optional[PageSyncStatus] = None
     section_name: str
     notebook_name: str
 
@@ -91,7 +89,7 @@ class PageSearchResponse(BaseModel):
     content_excerpt: Optional[str] = None
     section_name: str
     notebook_name: str
-    sync_status: PageSyncStatus
+    sync_status: Optional[PageSyncStatus] = None
 
 
 class MCPConnectionResponse(BaseModel):
@@ -160,7 +158,6 @@ class PageUpdate(BaseModel):
     content: Optional[str] = None
     content_hash: Optional[str] = None
     sync_status: Optional[PageSyncStatus] = None
-    last_synced_at: Optional[datetime] = None
 
 
 class MCPConnectionUpdate(BaseModel):
@@ -227,7 +224,18 @@ class GraphPage(BaseModel):
     last_modified_datetime: datetime = Field(alias="lastModifiedDateTime")
 
 
+class GraphPageElement(BaseModel):
+    kind: Literal["text", "image"]
+    text: str | None = None
+    image_url: str | None = None
+    # CSS absolute position — only meaningful for kind="image", used for composite rendering
+    top: float = 0.0
+    left: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+
+
 class GraphPageContent(BaseModel):
-    html: str
-    base_images: list[bytes]
-    ink_image: bytes | None
+    elements: list[GraphPageElement]  # ordered by CSS top/left — visual reading order
+    ink_strokes: list[list[tuple[float, float]]]  # HiMetric coords; empty list if no ink
+    has_handwriting: bool

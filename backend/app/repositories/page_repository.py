@@ -85,6 +85,10 @@ class PageRepository:
             offset=data.offset,
         )
 
+    async def list_by_section(self, section_id: int) -> list[PageResponse]:
+        rows = await self.session.scalars(select(Page).where(Page.section_id == section_id))
+        return [PageResponse.model_validate(row) for row in rows.all()]
+
     async def upsert_many(self, section_id: int, data: list[PageCreate]) -> list[PageResponse]:
         values = [{"section_id": section_id, **page.model_dump()} for page in data]
         insert_statement = pg_insert(Page).values(values)

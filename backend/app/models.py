@@ -28,17 +28,13 @@ class MicrosoftConnectionStatus(StrEnum):
 
 
 class NotebookSyncStatus(StrEnum):
-    FRESH = "FRESH"
     SYNCING = "SYNCING"
-    STALE = "STALE"
     FAILED = "FAILED"
     EXCLUDED = "EXCLUDED"
 
 
 class PageSyncStatus(StrEnum):
-    FRESH = "FRESH"
     SYNCING = "SYNCING"
-    STALE = "STALE"
     FAILED = "FAILED"
 
 
@@ -69,7 +65,7 @@ class Notebook(Base):
     onenote_id = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
     sync_enabled = Column(Boolean, nullable=False, default=True)
-    sync_status = Column(SAEnum(NotebookSyncStatus, name="notebook_sync_status"), nullable=False, default=NotebookSyncStatus.STALE)
+    sync_status = Column(SAEnum(NotebookSyncStatus, name="notebook_sync_status"), nullable=True, default=None)
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (UniqueConstraint("user_id", "onenote_id"),)
@@ -96,8 +92,7 @@ class Page(Base):
     content = Column(Text, nullable=True)
     search_vector = Column(TSVECTOR, Computed("to_tsvector('english', coalesce(content, ''))", persisted=True))
     content_hash = Column(String, nullable=True)
-    sync_status = Column(SAEnum(PageSyncStatus, name="page_sync_status"), nullable=False, default=PageSyncStatus.STALE)
-    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    sync_status = Column(SAEnum(PageSyncStatus, name="page_sync_status"), nullable=True, default=None)
 
     __table_args__ = (
         UniqueConstraint("section_id", "onenote_id"),

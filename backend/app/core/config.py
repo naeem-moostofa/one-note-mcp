@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     MICROSOFT_REDIRECT_URI: str
     MICROSOFT_SCOPES: str
     FRONTEND_ORIGIN: str
+    GOOGLE_CLOUD_VISION_API_KEY: str
 
     @computed_field
     @property
