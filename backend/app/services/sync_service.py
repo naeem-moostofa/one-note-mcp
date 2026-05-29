@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.graph_client import GraphClient, composite_page, encode_png, split_canvas_for_ocr
+from app.clients.graph_client import GraphClient, composite_page
 from app.clients.msal_client import MSALClient
 from app.clients.ocr_client import OCRClient
 from app.core.encryption import decrypt, encrypt
@@ -285,21 +285,15 @@ class SyncService:
                     else:
                         image_bytes_map[url] = result  # type: ignore[assignment]
 
-            # Build composite canvas: images at CSS positions, ink strokes on top
-            composite = composite_page(page_content.elements, image_bytes_map, page_content.ink_strokes)
+            # Build composite canvas (images at CSS positions, ink strokes on top) and OCR it.
+            # Single Vision call per page — the renderer clamps scale so the canvas fits Vision's cap.
+            composite_bytes = composite_page(page_content.elements, image_bytes_map, page_content.ink_strokes)
 
-            # Tile the composite (1 tile for normal pages, N tiles for very tall ones)
-            # and OCR each tile in parallel
             ocr_text = ""
-            if composite is not None:
+            if composite_bytes is not None:
                 if self._ocr_client is not None:
-                    tile_bytes = [encode_png(t) for t in split_canvas_for_ocr(composite)]
-                    tile_texts = await self._ocr_client.run_ocr_tiles(tile_bytes)
-                    ocr_text = "\n\n".join(t for t in tile_texts if t)
-                    logger.info(
-                        "        Composite OCR: %d tile(s), %d chars total",
-                        len(tile_bytes), len(ocr_text),
-                    )
+                    ocr_text = await asyncio.to_thread(self._ocr_client.run_ocr, composite_bytes)
+                    logger.info("        Composite OCR: %d chars", len(ocr_text))
                 else:
                     logger.info("        Composite built but OCR client not loaded — skipping")
 

@@ -23,14 +23,11 @@ _INKML_NS = "http://www.w3.org/2003/InkML"
 # 1 HiMetric = 0.01 mm; at 96 DPI: px = himetric * 96 / 2540.
 _HIMETRIC_TO_PX_BASE = 96.0 / 2540.0
 # Oversampling factor for the composite — larger = more pixels per glyph = better OCR
-# on dense handwriting. We tile the composite for Vision rather than clamping scale.
+# on dense handwriting. Clamped down if the page is large enough to exceed Vision's cap.
 _TARGET_RENDER_SCALE = 2.0
-# Sanity cap on composite size to prevent runaway memory for pathologically tall pages.
-# At 3 bytes/pixel RGB this is ~750 MB; if exceeded, _RENDER_SCALE is clamped down.
-_MAX_COMPOSITE_PIXELS = 250_000_000
-# Max pixels per OCR tile. Well under Vision's 75 MP cap (no auto-resize) and well under
-# the 7.5 MB raw / 10 MB JSON request cap. Tiles >30 MP risk Vision silently downscaling.
-_MAX_TILE_PIXELS = 30_000_000
+# Vision's hard per-image cap is 75 MP (it silently downscales above that). We stay
+# safely under to avoid quality loss; render_scale is clamped to keep canvas ≤ this.
+_MAX_RENDER_PIXELS = 70_000_000
 _BASE_INK_STROKE_WIDTH = 4  # px at 1x scale
 
 _M = TypeVar("_M")
@@ -124,16 +121,16 @@ def composite_page(
     elements: list[GraphPageElement],
     image_bytes_map: dict[str, bytes],
     ink_strokes: list[InkStroke],
-) -> Image.Image | None:
-    """Render images at their CSS positions then draw ink strokes on top.
+) -> bytes | None:
+    """Render images at their CSS positions, draw ink strokes on top, return PNG bytes.
 
-    Returns a PIL Image for the composite canvas, or None if there is nothing to render
-    (no images and no ink strokes). Typed text elements are ignored — callers extract
-    those as plain text separately.
+    Returns PNG-encoded bytes for the composite canvas, or None if there is nothing
+    to render (no images and no ink strokes). Typed text elements are ignored — callers
+    extract those as plain text separately.
 
-    Renders at _TARGET_RENDER_SCALE; only scales back if the page is enormous enough
-    to threaten memory (>250 MP at 3 bytes/pixel = ~750 MB). For Vision API limits,
-    use split_canvas_for_ocr() to tile the result.
+    Renders at _TARGET_RENDER_SCALE, clamping down so the canvas stays ≤ _MAX_RENDER_PIXELS
+    (under Vision's 75 MP per-image cap, above which it silently downscales). One
+    Vision call per page — no tiling.
     """
     image_elements = [e for e in elements if e.kind == "image" and e.image_url]
 
@@ -152,9 +149,9 @@ def composite_page(
     base_w = max(base_w, 1.0)
     base_h = max(base_h, 1.0)
 
-    # Pick the largest scale ≤ target that keeps us under the memory safety cap.
-    max_scale_for_memory = (_MAX_COMPOSITE_PIXELS / (base_w * base_h)) ** 0.5
-    render_scale = min(_TARGET_RENDER_SCALE, max_scale_for_memory)
+    # Pick the largest scale ≤ target that keeps us under Vision's per-image pixel cap.
+    max_scale_for_vision = (_MAX_RENDER_PIXELS / (base_w * base_h)) ** 0.5
+    render_scale = min(_TARGET_RENDER_SCALE, max_scale_for_vision)
     himetric_to_px = _HIMETRIC_TO_PX_BASE * render_scale
     stroke_width = max(1, int(_BASE_INK_STROKE_WIDTH * render_scale))
 
@@ -162,8 +159,8 @@ def composite_page(
     canvas_h = max(int(base_h * render_scale), 1)
     if render_scale < _TARGET_RENDER_SCALE:
         logger.info(
-            "composite_page: scaled to %.2fx (target %.2fx) to fit %dx%d under %d MP memory cap",
-            render_scale, _TARGET_RENDER_SCALE, canvas_w, canvas_h, _MAX_COMPOSITE_PIXELS // 1_000_000,
+            "composite_page: scaled to %.2fx (target %.2fx) to fit %dx%d under %d MP Vision cap",
+            render_scale, _TARGET_RENDER_SCALE, canvas_w, canvas_h, _MAX_RENDER_PIXELS // 1_000_000,
         )
 
     canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
@@ -193,65 +190,8 @@ def composite_page(
             else:
                 draw.line(pts, fill="black", width=stroke_width, joint="curve")
 
-    return canvas
-
-
-def split_canvas_for_ocr(canvas: Image.Image, max_pixels: int = _MAX_TILE_PIXELS) -> list[Image.Image]:
-    """Split a tall composite into vertical tiles each ≤ max_pixels.
-
-    Picks split points at horizontal rows with the least ink density (within a search
-    window around each evenly-spaced target row) so a tile boundary lands in whitespace
-    between lines of text rather than slicing through a glyph.
-
-    Returns [canvas] unchanged if the whole image already fits in one tile.
-    """
-    w, h = canvas.size
-    total_pixels = w * h
-    if total_pixels <= max_pixels:
-        return [canvas]
-
-    n_tiles = (total_pixels + max_pixels - 1) // max_pixels  # ceil
-    nominal_tile_h = h // n_tiles
-
-    grayscale = canvas.convert("L")
-    # Treat anything below 200 as "ink"; sum the histogram up to that level per row band.
-    INK_THRESHOLD = 200
-    SAMPLE_BAND_HEIGHT = 5  # px — sample 5-row bands for stability, not single rows
-
-    splits = [0]
-    for i in range(1, n_tiles):
-        target = i * nominal_tile_h
-        radius = max(50, nominal_tile_h // 8)
-        start = max(splits[-1] + SAMPLE_BAND_HEIGHT, target - radius)
-        end = min(h - SAMPLE_BAND_HEIGHT, target + radius)
-        if end <= start:
-            splits.append(target)
-            continue
-
-        best_y = start
-        best_ink = None
-        for y in range(start, end, SAMPLE_BAND_HEIGHT):
-            band = grayscale.crop((0, y, w, y + SAMPLE_BAND_HEIGHT))
-            ink = sum(band.histogram()[:INK_THRESHOLD])
-            if best_ink is None or ink < best_ink:
-                best_ink = ink
-                best_y = y
-        splits.append(best_y)
-    splits.append(h)
-
-    tiles = [canvas.crop((0, splits[i], w, splits[i + 1])) for i in range(len(splits) - 1)]
-    logger.info(
-        "split_canvas_for_ocr: %dx%d (%d MP) -> %d tiles (heights: %s)",
-        w, h, total_pixels // 1_000_000, len(tiles),
-        [t.size[1] for t in tiles],
-    )
-    return tiles
-
-
-def encode_png(image: Image.Image) -> bytes:
-    """Encode a PIL Image to PNG bytes."""
     buf = io.BytesIO()
-    image.save(buf, format="PNG")
+    canvas.save(buf, format="PNG")
     return buf.getvalue()
 
 
