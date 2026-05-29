@@ -172,6 +172,52 @@ class PageSearchQuery(BaseModel):
     notebook_ids: list[int]
 
 
+# --- Search service schemas ---
+
+class PageFTSHit(BaseModel):
+    """Single FTS match returned by PageRepository.search_fts."""
+    page_id: int
+    rank: float
+    content: str
+
+
+class PageTrgmHit(BaseModel):
+    """Single trigram fuzzy match returned by PageRepository.search_trgm."""
+    page_id: int
+    score: float  # max word_similarity across the matched terms
+    content: str
+
+
+class PageWithPath(BaseModel):
+    """Path + staleness metadata used to build SearchHit responses."""
+    model_config = ConfigDict(from_attributes=True)
+
+    page_id: int
+    page_title: Optional[str] = None
+    section_name: str
+    notebook_id: int
+    notebook_name: str
+    page_sync_status: Optional[PageSyncStatus] = None
+    notebook_sync_status: Optional[NotebookSyncStatus] = None
+
+
+class SearchSnippet(BaseModel):
+    """A character window of `pages.content` around one or more match offsets."""
+    text: str
+    start_offset: int  # offset into pages.content where this window starts
+
+
+class SearchHit(BaseModel):
+    """One page in the SearchService.search result list."""
+    page_id: int
+    page_title: Optional[str] = None
+    section_name: str
+    notebook_id: int
+    notebook_name: str
+    snippets: list[SearchSnippet]
+    stale: bool
+
+
 # --- Client schemas ---
 
 class MSALIDTokenClaims(BaseModel):

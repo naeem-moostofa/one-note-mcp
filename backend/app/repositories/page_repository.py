@@ -1,9 +1,20 @@
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Notebook, Page, Section
-from app.schemas import PageCreate, PageDetailResponse, PageResponse, PageSearchQuery, PageSearchResponse, PageUpdate, PaginatedResponse
+from app.schemas import (
+    PageCreate,
+    PageDetailResponse,
+    PageFTSHit,
+    PageResponse,
+    PageSearchQuery,
+    PageSearchResponse,
+    PageTrgmHit,
+    PageUpdate,
+    PageWithPath,
+    PaginatedResponse,
+)
 
 
 class PageRepository:
@@ -84,6 +95,135 @@ class PageRepository:
             limit=data.limit,
             offset=data.offset,
         )
+
+    async def search_fts(
+        self,
+        notebook_ids: list[int],
+        query: str,
+        limit: int,
+    ) -> list[PageFTSHit]:
+        """First-pass full-text search. Returns matching pages with ts_rank_cd scores and content."""
+        if not query.strip() or not notebook_ids:
+            return []
+
+        # websearch_to_tsquery is the safest variant for arbitrary user input —
+        # it tolerates unbalanced quotes, supports phrase quoting, and never errors
+        # on stray operators the way to_tsquery does.
+        ts_query = func.websearch_to_tsquery("english", query)
+        rank = func.ts_rank_cd(Page.search_vector, ts_query)
+
+        statement = (
+            select(Page.id, rank.label("rank"), Page.content)
+            .join(Section, Page.section_id == Section.id)
+            .where(
+                Section.notebook_id.in_(notebook_ids),
+                Page.search_vector.op("@@")(ts_query),
+                Page.content.isnot(None),
+            )
+            .order_by(rank.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(statement)
+        return [
+            PageFTSHit(page_id=row.id, rank=float(row.rank), content=row.content)
+            for row in result.all()
+        ]
+
+    async def search_trgm(
+        self,
+        notebook_ids: list[int],
+        terms: list[str],
+        threshold: float,
+        limit: int,
+    ) -> list[PageTrgmHit]:
+        """
+        Trigram fuzzy fallback. For each candidate page, scores against the
+        per-term max of `word_similarity(term, content)`. `word_similarity`
+        measures the best-matching substring of `content` regardless of how
+        long the page is — exactly what we want when the query term is a
+        short OCR'd word inside many KB of page content.
+
+        The WHERE clause uses the `<%` operator (word_similarity above the
+        session GUC threshold), which the planner can answer using the
+        ix_pages_content_trgm GIN index — at scale this turns an O(pages)
+        scan into an O(candidates) lookup. `word_similarity(...)` stays in
+        the SELECT/ORDER BY so the score is exact and ranking is unchanged.
+
+        `set_config('pg_trgm.word_similarity_threshold', t, true)` aligns the
+        GUC the `<%` operator reads with the caller-supplied `threshold`. The
+        third argument `is_local = true` scopes the override to the current
+        transaction — same effect as `SET LOCAL`, but `set_config` is a normal
+        function-call SELECT and accepts bound parameters, whereas `SET LOCAL`
+        is a utility statement that Postgres won't parameterize through the
+        extended-query protocol asyncpg uses.
+        """
+        if not terms or not notebook_ids:
+            return []
+
+        await self.session.execute(
+            text("SELECT set_config('pg_trgm.word_similarity_threshold', :t, true)")
+            .bindparams(t=str(threshold))
+        )
+
+        sim_exprs = [func.word_similarity(term, Page.content) for term in terms]
+        # GREATEST takes 2+ args; collapse to the single expression when there's one term.
+        max_sim = func.greatest(*sim_exprs) if len(sim_exprs) > 1 else sim_exprs[0]
+
+        # `term <% content` (LHS is the short query, RHS is the long content)
+        # is the form supported by the GIN trgm_ops index. Multiple terms
+        # OR-combine into a BitmapOr plan.
+        indexed_filters = [literal(term).op("<%")(Page.content) for term in terms]
+        indexed_filter = or_(*indexed_filters) if len(indexed_filters) > 1 else indexed_filters[0]
+
+        statement = (
+            select(Page.id, max_sim.label("score"), Page.content)
+            .join(Section, Page.section_id == Section.id)
+            .where(
+                Section.notebook_id.in_(notebook_ids),
+                Page.content.isnot(None),
+                indexed_filter,
+            )
+            .order_by(max_sim.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(statement)
+        return [
+            PageTrgmHit(page_id=row.id, score=float(row.score), content=row.content)
+            for row in result.all()
+        ]
+
+    async def get_pages_with_path(self, page_ids: list[int]) -> list[PageWithPath]:
+        """Resolve notebook + section path and per-row sync status for SearchHit assembly."""
+        if not page_ids:
+            return []
+
+        statement = (
+            select(
+                Page.id,
+                Page.title,
+                Page.sync_status,
+                Section.display_name.label("section_name"),
+                Notebook.id.label("notebook_id"),
+                Notebook.display_name.label("notebook_name"),
+                Notebook.sync_status.label("notebook_sync_status"),
+            )
+            .join(Section, Page.section_id == Section.id)
+            .join(Notebook, Section.notebook_id == Notebook.id)
+            .where(Page.id.in_(page_ids))
+        )
+        result = await self.session.execute(statement)
+        return [
+            PageWithPath(
+                page_id=row.id,
+                page_title=row.title,
+                section_name=row.section_name,
+                notebook_id=row.notebook_id,
+                notebook_name=row.notebook_name,
+                page_sync_status=row.sync_status,
+                notebook_sync_status=row.notebook_sync_status,
+            )
+            for row in result.all()
+        ]
 
     async def list_by_section(self, section_id: int) -> list[PageResponse]:
         rows = await self.session.scalars(select(Page).where(Page.section_id == section_id))

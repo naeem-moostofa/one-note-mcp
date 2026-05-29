@@ -97,6 +97,12 @@ class Page(Base):
     __table_args__ = (
         UniqueConstraint("section_id", "onenote_id"),
         Index("ix_pages_search_vector_gin", "search_vector", postgresql_using="gin"),
+        Index(
+            "ix_pages_content_trgm",
+            "content",
+            postgresql_using="gin",
+            postgresql_ops={"content": "gin_trgm_ops"},
+        ),
     )
 
 
