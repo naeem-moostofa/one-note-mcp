@@ -163,7 +163,6 @@ class SearchService:
                 page_id=path.page_id,
                 page_title=path.page_title,
                 section_name=path.section_name,
-                notebook_id=path.notebook_id,
                 notebook_name=path.notebook_name,
                 snippets=snippets,
                 stale=_is_stale(path),
@@ -258,10 +257,7 @@ def _build_snippets(
         # could locate the trigram-matched substring directly; for V1 this
         # is good enough.
         end = min(len(content), 2 * search_size)
-        return [SearchSnippet(
-            text=_clean_snippet_text(content[0:end]),
-            start_offset=0,
-        )]
+        return [SearchSnippet(text=_clean_snippet_text(content[0:end]))]
 
     merged = _merge_windows(windows)
     # Keep the longest (most-context-rich) windows first — they're the merged
@@ -272,10 +268,7 @@ def _build_snippets(
     merged.sort(key=lambda w: w.start)
 
     return [
-        SearchSnippet(
-            text=_clean_snippet_text(content[w.start:w.end]),
-            start_offset=w.start,
-        )
+        SearchSnippet(text=_clean_snippet_text(content[w.start:w.end]))
         for w in merged
     ]
 

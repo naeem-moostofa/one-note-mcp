@@ -32,23 +32,33 @@ class PageRepository:
         return PageResponse.model_validate(row) if row else None
 
     async def get_with_context(self, page_id: int) -> PageDetailResponse | None:
-        result = await self.session.execute(
+        """Single-page lookup joined with its section and notebook.
+
+        Returns full content, the section + notebook the page belongs to, both
+        sync statuses, and the notebook's `last_synced_at` (pages don't carry
+        their own — they're synced as part of a notebook run). Consumed by the
+        MCP `onenote_get_page` tool (projected to `PageContent`) and by any
+        future REST page-detail endpoint.
+        """
+        statement = (
             select(
-                Page.id,
+                Page.id.label("page_id"),
                 Page.onenote_id,
-                Page.title,
+                Page.title.label("page_title"),
                 Page.content,
                 Page.content_hash,
-                Page.sync_status,
-                Page.last_synced_at,
+                Page.sync_status.label("page_sync_status"),
                 Section.display_name.label("section_name"),
+                Notebook.id.label("notebook_id"),
                 Notebook.display_name.label("notebook_name"),
+                Notebook.sync_status.label("notebook_sync_status"),
+                Notebook.last_synced_at.label("notebook_last_synced_at"),
             )
             .join(Section, Page.section_id == Section.id)
             .join(Notebook, Section.notebook_id == Notebook.id)
             .where(Page.id == page_id)
         )
-        row = result.one_or_none()
+        row = (await self.session.execute(statement)).one_or_none()
         if row is None:
             return None
         return PageDetailResponse.model_validate(row)

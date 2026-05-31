@@ -6,14 +6,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.clients.graph_client import GraphClient
 from app.core.config import settings
+from app.mcp.server import mcp_app
 from app.routers import auth
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # FastMCP's streamable-http transport requires its lifespan to run so the
+    # session manager is initialised — Starlette's mount() doesn't propagate
+    # nested lifespans, so we drive it from ours.
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
         app.state.graph_client = GraphClient(http_client)
-        yield
+        async with mcp_app.lifespan(app):
+            yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -27,3 +32,4 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.mount("/mcp", mcp_app)

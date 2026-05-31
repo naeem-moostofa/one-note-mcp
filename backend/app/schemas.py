@@ -67,19 +67,6 @@ class PageResponse(BaseModel):
     sync_status: Optional[PageSyncStatus] = None
 
 
-class PageDetailResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    onenote_id: str
-    title: Optional[str] = None
-    content: Optional[str] = None
-    content_hash: Optional[str] = None
-    sync_status: Optional[PageSyncStatus] = None
-    section_name: str
-    notebook_name: str
-
-
 class PageSearchResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -104,6 +91,24 @@ class MCPConnectionResponse(BaseModel):
     created_at: datetime
     last_used_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
+
+
+class MCPConnectionCreatedResponse(BaseModel):
+    """Returned by `MCPConnectionService.create` — the only place `raw_token`
+    is ever exposed. Subsequent reads of the connection won't include it (the
+    DB only stores the hash). Callers are expected to surface the raw token
+    to the user once, then discard.
+
+    Internal fields (`user_id`, `token_hash`, `last_used_at`, `revoked_at`)
+    are intentionally omitted — at creation time they're either implicit (the
+    caller is the owning user) or trivially known (timestamps are null,
+    token_hash is internal-only)."""
+    id: int
+    display_name: Optional[str] = None
+    scope_all_notebooks: bool
+    notebook_ids: Optional[list[int]] = None
+    created_at: datetime
+    raw_token: str
 
 
 # --- Create schemas ---
@@ -204,7 +209,6 @@ class PageWithPath(BaseModel):
 class SearchSnippet(BaseModel):
     """A character window of `pages.content` around one or more match offsets."""
     text: str
-    start_offset: int  # offset into pages.content where this window starts
 
 
 class SearchHit(BaseModel):
@@ -212,10 +216,62 @@ class SearchHit(BaseModel):
     page_id: int
     page_title: Optional[str] = None
     section_name: str
-    notebook_id: int
     notebook_name: str
     snippets: list[SearchSnippet]
     stale: bool
+
+
+class PageDetailResponse(BaseModel):
+    """Single-page detail with full content and surrounding section/notebook context.
+
+    Used by the MCP `onenote_get_page` tool (which projects this to `PageContent`)
+    and intended to back any future REST endpoint that surfaces a single page.
+    `notebook_last_synced_at` comes from the notebook because pages don't carry
+    their own last-synced timestamp — they're synced as part of a notebook run.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    page_id: int
+    onenote_id: str
+    page_title: Optional[str] = None
+    content: Optional[str] = None
+    content_hash: Optional[str] = None
+    page_sync_status: Optional[PageSyncStatus] = None
+    section_name: str
+    notebook_id: int
+    notebook_name: str
+    notebook_sync_status: Optional[NotebookSyncStatus] = None
+    notebook_last_synced_at: Optional[datetime] = None
+
+
+# --- MCP-layer schemas (what tools return to the calling LLM) ---
+
+
+class NotebookSummary(BaseModel):
+    """Slim notebook descriptor surfaced to MCP callers — id + name only."""
+    id: int
+    display_name: str
+
+
+class PageContent(BaseModel):
+    """Full-page response from the onenote_get_page MCP tool."""
+    page_title: Optional[str] = None
+    section_name: str
+    notebook_name: str
+    content: str
+    stale: bool
+
+
+class ResolvedMCPConnection(BaseModel):
+    """An authenticated MCP connection with its allowed notebook scope already resolved.
+
+    `allowed_notebook_ids` is the intersection of the connection's stored scope
+    (either all notebooks for the user, or a specific list) with the user's
+    currently sync-enabled notebooks. Empty list = nothing visible.
+    """
+    connection_id: int
+    user_id: int
+    allowed_notebook_ids: list[int]
 
 
 # --- Client schemas ---
