@@ -59,6 +59,7 @@ Routers handle HTTP only — validate the incoming request, call into a service,
 |---|---|
 | `GET /api/notebooks` | Lists all notebooks for the current user with sync status |
 | `PATCH /api/notebooks/{id}` | Toggles `sync_enabled` on a notebook |
+| `POST /api/notebooks/refresh` | Names-only Graph discovery (list → upsert → delete-stale, no sections/pages/OCR) so the UI can populate notebooks immediately after a Microsoft connect, before the first full sync. Delegates to `SyncService.refresh_notebook_list`. See `plans/rest-api-plan.md` |
 
 ### `routers/mcp_connections.py`
 | endpoint | description |
@@ -126,6 +127,8 @@ Title is intentionally not weighted into ranking for V1 — small expected gain 
 ### `services/sync_service.py`
 - Contains all sync logic — calls `graph_client`, `msal_client`, `ocr_client`, and repositories
 - Entry point called by `sync/run.py`
+- `refresh_notebook_list(user_id)` — names-only notebook discovery for one user (list → upsert → delete-stale, no sections/pages/OCR), backing `POST /api/notebooks/refresh`. Shares the `_discover_notebooks` helper with the full sync's per-connection discovery step, so the cron and the web button never drift. Raises `ConflictError` (→ 409) when the user has no active Microsoft connection or the token needs re-auth
+- Writes `FRESH` on a successful row sync and never `EXCLUDED` — sync health and the `sync_enabled` exclusion flag are orthogonal (see the status-model section in `docs/db_plan.md`)
 
 ---
 

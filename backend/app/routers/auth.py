@@ -2,13 +2,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.msal_client import MSALClient, get_msal_client
 from app.core.auth import get_current_user_id
 from app.core.config import settings
-from app.core.database import get_session
 from app.core.encryption import decrypt, encrypt
+from app.routers.deps import get_auth_service
 from app.schemas import MSALAuthCodeFlow
 from app.services.auth_service import AuthService
 
@@ -17,13 +15,6 @@ router = APIRouter(prefix="/auth/microsoft", tags=["auth"])
 _COOKIE_NAME = "oauth_flow"
 _COOKIE_MAX_AGE = 600  # 10 minutes — enough for any login interaction
 _COOKIE_SECURE = settings.MICROSOFT_REDIRECT_URI.startswith("https")
-
-
-def get_auth_service(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    msal_client: Annotated[MSALClient, Depends(get_msal_client)],
-) -> AuthService:
-    return AuthService(session, msal_client)
 
 
 @router.get("/login")

@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.core.exceptions import ForbiddenError, InvalidRequestError, ResourceNotFoundError
 from app.repositories.mcp_connection_repository import MCPConnectionRepository
 from app.repositories.notebook_repository import NotebookRepository
 from app.schemas import (
@@ -77,8 +79,16 @@ class MCPConnectionService:
         notebook_ids: list[int] | None = None,
         display_name: str | None = None,
     ) -> MCPConnectionCreatedResponse:
-        """Mint a new connection. The returned `raw_token` is the only chance
-        the caller has to see it — only the hash is persisted."""
+        """Mint a connection. raw_token is returned once; only its hash is persisted.
+        A scoped connection must name notebooks the caller owns."""
+        if not scope_all_notebooks:
+            if not notebook_ids:
+                raise InvalidRequestError("notebook_ids required when scope_all_notebooks is False")
+            owned = {nb.id for nb in await self._notebook_repo.list_by_user(user_id)}
+            if not set(notebook_ids).issubset(owned):
+                # Non-leaking: doesn't reveal which id is unowned.
+                raise InvalidRequestError("one or more notebook_ids are invalid")
+
         raw_token = _RAW_TOKEN_PREFIX + secrets.token_urlsafe(32)
         record = await self._repo.create(
             user_id,
@@ -96,17 +106,19 @@ class MCPConnectionService:
             notebook_ids=record.notebook_ids,
             created_at=record.created_at,
             raw_token=raw_token,
+            mcp_url=settings.MCP_SERVER_URL,
         )
 
     async def list_for_user(self, user_id: int) -> list[MCPConnectionResponse]:
         return await self._repo.list_by_user(user_id)
 
     async def revoke(self, user_id: int, connection_id: int) -> None:
-        """Sets `revoked_at` if the connection belongs to `user_id`. Silent no-op
-        otherwise — the REST layer should 404 in that case."""
-        owned = await self._repo.list_by_user(user_id)
-        if not any(c.id == connection_id for c in owned):
-            return
+        """Set revoked_at — 404 if the connection doesn't exist, 403 if it isn't owned."""
+        conn = await self._repo.get_by_id(connection_id)
+        if conn is None:
+            raise ResourceNotFoundError("Connection not found")
+        if conn.user_id != user_id:
+            raise ForbiddenError("Not your connection")
         await self._repo.update(
             connection_id,
             MCPConnectionUpdate(revoked_at=datetime.now(timezone.utc)),

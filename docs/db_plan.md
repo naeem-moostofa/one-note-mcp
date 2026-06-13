@@ -65,11 +65,29 @@ erDiagram
 
 ## Enum Values
 
-**microsoft_connections.status**: `active`, `needs_reauth`
+**microsoft_connections.status**: `ACTIVE`, `NEEDS_REAUTH`
 
-**notebooks.sync_status**: `fresh`, `syncing`, `stale`, `failed`, `excluded`
+**notebooks.sync_status**: `PENDING`, `SYNCING`, `FRESH`, `FAILED` — **non-nullable**, default `PENDING`
 
-**pages.sync_status**: `fresh`, `syncing`, `stale`, `failed`
+**pages.sync_status**: `PENDING`, `SYNCING`, `FRESH`, `FAILED` — **non-nullable**, default `PENDING`
+
+### Sync-status design (read before touching `sync_service`)
+
+The status column answers exactly one question — *"how healthy is the last sync of this row?"* — with a concrete value at all times:
+
+| value | meaning |
+|---|---|
+| `PENDING` | row discovered (name known) but never content-synced |
+| `SYNCING` | a sync run is currently processing it |
+| `FRESH` | last sync completed successfully |
+| `FAILED` | last sync attempt errored |
+
+Two earlier values were removed:
+
+- **`STALE` is derived, never stored.** "Possibly out of date" is computed at read time from `SYNCING`/`FAILED` (the MCP's `_is_stale` helper). Storing it would mean a writer has to know to flip every row to stale on every relevant event — a maintenance trap. Keep it computed.
+- **`EXCLUDED` is redundant with `notebooks.sync_enabled`.** Exclusion is a *user setting* (`sync_enabled = false`), orthogonal to sync health. Encoding it as a status created a second source of truth and forced the sync job to overwrite real status with `EXCLUDED`. A disabled notebook keeps whatever health status it last had; the UI renders "Disabled" off `sync_enabled`.
+
+**Implementation consequence:** `sync_service` must write `FRESH` on success (it currently writes `None`), drop the block that sets `EXCLUDED` on disabled notebooks, and new rows default to `PENDING` instead of `NULL`. There is no `NULL` status anymore — `NULL`-means-fresh was an overload that conflated "never synced" with "synced fine." This keeps the only nullable status in the system on `microsoft_connections` (absence of a connection row), where `NULL` legitimately means "not connected."
 
 ---
 

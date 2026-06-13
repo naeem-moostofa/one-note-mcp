@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     MICROSOFT_SCOPES: str
     FRONTEND_ORIGIN: str
     GOOGLE_CLOUD_VISION_API_KEY: str
+    MCP_SERVER_URL: str
 
     @computed_field
     @property

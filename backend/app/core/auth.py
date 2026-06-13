@@ -10,7 +10,9 @@ from app.core.config import settings
 _ALGORITHM = "HS256"
 _TOKEN_EXPIRE_DAYS = 30
 
-_security = HTTPBearer()
+# auto_error=False so a missing header is our 401, not HTTPBearer's default 403
+# (403 is reserved for ForbiddenError).
+_security = HTTPBearer(auto_error=False)
 
 
 def create_jwt(user_id: int) -> str:
@@ -22,8 +24,10 @@ def create_jwt(user_id: int) -> str:
 
 
 def get_current_user_id(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(_security)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_security)],
 ) -> int:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         payload = jwt.decode(
             credentials.credentials,

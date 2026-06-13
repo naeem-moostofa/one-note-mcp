@@ -407,17 +407,17 @@ content hash
 
 last error
 
-Possible statuses:
+Possible stored statuses (non-nullable, default `pending`):
 
-fresh
+pending
 
 syncing
 
-stale
+fresh
 
 failed
 
-excluded
+`stale` is derived at read time (from `syncing`/`failed`), not stored. Exclusion is the separate `sync_enabled` flag, not a status. See `docs/db_plan.md` → "Sync-status design".
 
 Frontend
 

@@ -9,7 +9,7 @@ from app.clients.graph_client import GraphClient, composite_page
 from app.clients.msal_client import MSALClient
 from app.clients.ocr_client import OCRClient
 from app.core.encryption import decrypt, encrypt
-from app.core.exceptions import MSALAuthError
+from app.core.exceptions import ConflictError, MSALAuthError
 from app.models import MicrosoftConnectionStatus, NotebookSyncStatus, PageSyncStatus
 from app.repositories.microsoft_connection_repository import MicrosoftConnectionRepository
 from app.repositories.notebook_repository import NotebookRepository
@@ -96,7 +96,7 @@ class SyncService:
             await self._sync_notebook(notebook, access_token)
             await self._notebook_repo.update(
                 notebook.id,
-                NotebookUpdate(sync_status=None, last_synced_at=sync_started_at),
+                NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at),
             )
         except Exception:
             await self._notebook_repo.update(notebook.id, NotebookUpdate(sync_status=NotebookSyncStatus.FAILED))
@@ -122,6 +122,36 @@ class SyncService:
         )
         return token_result.access_token
 
+    async def _discover_notebooks(self, user_id: int, access_token: str) -> list[NotebookResponse]:
+        """Names-only Graph discovery: list → upsert → delete-stale. Shared by full sync and refresh."""
+        graph_notebooks = await self._graph_client.get_notebooks(access_token)
+        graph_notebook_ids = {n.id for n in graph_notebooks}
+        logger.info("Found %d notebooks in Graph", len(graph_notebooks))
+
+        db_notebooks = await self._notebook_repo.upsert_many(
+            user_id,
+            [NotebookCreate(onenote_id=n.id, display_name=n.display_name) for n in graph_notebooks],
+        )
+
+        all_db_notebooks = await self._notebook_repo.list_by_user(user_id)
+        notebooks_to_delete = [n.id for n in all_db_notebooks if n.onenote_id not in graph_notebook_ids]
+        if notebooks_to_delete:
+            logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
+            await self._notebook_repo.delete_many(notebooks_to_delete)
+
+        return db_notebooks
+
+    async def refresh_notebook_list(self, user_id: int) -> None:
+        """Web-triggered names-only discovery for one user. Raises ConflictError if no usable connection."""
+        connection = await self._connection_repo.get_by_user_id(user_id)
+        if connection is None or connection.status != MicrosoftConnectionStatus.ACTIVE:
+            raise ConflictError("No active Microsoft connection — connect your account first")
+        access_token = await self._acquire_token(connection)
+        if access_token is None:
+            # _acquire_token already flipped the connection to NEEDS_REAUTH
+            raise ConflictError("Microsoft session expired — reconnect your account")
+        await self._discover_notebooks(connection.user_id, access_token)
+
     async def _sync_connection(self, connection: MicrosoftConnectionResponse) -> None:
         access_token = await self._acquire_token(connection)
         if access_token is None:
@@ -129,28 +159,7 @@ class SyncService:
 
         logger.info("Token acquired for user %s", connection.user_id)
 
-        graph_notebooks = await self._graph_client.get_notebooks(access_token)
-        graph_notebook_ids = {n.id for n in graph_notebooks}
-        logger.info("Found %d notebooks in Graph", len(graph_notebooks))
-
-        db_notebooks = await self._notebook_repo.upsert_many(
-            connection.user_id,
-            [NotebookCreate(onenote_id=n.id, display_name=n.display_name) for n in graph_notebooks],
-        )
-
-        all_db_notebooks = await self._notebook_repo.list_by_user(connection.user_id)
-        notebooks_to_delete = [n.id for n in all_db_notebooks if n.onenote_id not in graph_notebook_ids]
-        if notebooks_to_delete:
-            logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
-            await self._notebook_repo.delete_many(notebooks_to_delete)
-
-        disabled_notebooks = [n for n in db_notebooks if not n.sync_enabled]
-        if disabled_notebooks:
-            logger.info("Skipping %d excluded notebooks: %s", len(disabled_notebooks), [n.display_name for n in disabled_notebooks])
-            await self._notebook_repo.update_many(
-                [n.id for n in disabled_notebooks],
-                NotebookUpdate(sync_status=NotebookSyncStatus.EXCLUDED),
-            )
+        db_notebooks = await self._discover_notebooks(connection.user_id, access_token)
 
         enabled_notebooks = [n for n in db_notebooks if n.sync_enabled]
         if not enabled_notebooks:
@@ -169,7 +178,7 @@ class SyncService:
                 await self._sync_notebook(notebook, access_token)
                 await self._notebook_repo.update(
                     notebook.id,
-                    NotebookUpdate(sync_status=None, last_synced_at=sync_started_at),
+                    NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at),
                 )
                 logger.info("Notebook '%s' synced successfully", notebook.display_name)
             except Exception:
@@ -310,7 +319,7 @@ class SyncService:
                 PageUpdate(
                     content=content,
                     content_hash=_compute_hash(content),
-                    sync_status=None,
+                    sync_status=PageSyncStatus.FRESH,
                 ),
             )
         except Exception:

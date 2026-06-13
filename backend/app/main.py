@@ -3,11 +3,13 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.clients.graph_client import GraphClient
 from app.core.config import settings
+from app.core.exceptions import AppError
 from app.mcp.server import mcp_app
-from app.routers import auth
+from app.routers import auth, mcp_connections, me, notebooks
 
 
 @asynccontextmanager
@@ -32,4 +34,13 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(me.router)
+app.include_router(notebooks.router)
+app.include_router(mcp_connections.router)
 app.mount("/mcp", mcp_app)
+
+
+# Maps domain errors → HTTP via each error's own status_code.
+@app.exception_handler(AppError)
+async def _app_error_handler(request, exc: AppError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc) or exc.__class__.__name__})

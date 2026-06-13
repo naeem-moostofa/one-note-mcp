@@ -42,8 +42,7 @@ class NotebookResponse(BaseModel):
     onenote_id: str
     display_name: str
     sync_enabled: bool
-    sync_status: Optional[NotebookSyncStatus] = None
-    last_synced_at: Optional[datetime] = None
+    sync_status: NotebookSyncStatus
 
 
 class SectionResponse(BaseModel):
@@ -64,7 +63,7 @@ class PageResponse(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     content_hash: Optional[str] = None
-    sync_status: Optional[PageSyncStatus] = None
+    sync_status: PageSyncStatus 
 
 
 class PageSearchResponse(BaseModel):
@@ -109,6 +108,55 @@ class MCPConnectionCreatedResponse(BaseModel):
     notebook_ids: Optional[list[int]] = None
     created_at: datetime
     raw_token: str
+    mcp_url: str  # the MCP endpoint the client connects to, e.g. http://localhost:8000/mcp
+
+
+# --- Web-facing schemas (sanitized; consumed by the React frontend) ---
+
+class MeResponse(BaseModel):
+    """Account page payload: profile + Microsoft connection status (never the MSAL cache)."""
+    id: int
+    email: str
+    display_name: str
+    created_at: datetime
+    microsoft_status: Optional[MicrosoftConnectionStatus] = None  # None = not connected
+
+
+class NotebookWebResponse(BaseModel):
+    """Notebook as shown on the web Notebooks page. sync_status is orthogonal to sync_enabled."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    display_name: str
+    sync_enabled: bool
+    sync_status: NotebookSyncStatus
+    last_synced_at: Optional[datetime] = None
+
+
+class MCPConnectionWebResponse(BaseModel):
+    """MCP connection as listed on the web — no token material (the router's
+    response_model strips token_hash/user_id from the internal shape)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    display_name: Optional[str] = None
+    scope_all_notebooks: bool
+    notebook_ids: Optional[list[int]] = None
+    created_at: datetime
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+
+
+class NotebookSyncToggleRequest(BaseModel):
+    """PATCH /api/notebooks/{id} body — the client may only flip sync_enabled."""
+    sync_enabled: bool
+
+
+class MCPConnectionCreateRequest(BaseModel):
+    """POST /api/mcp-connections body. Scope/ownership validation lives in the service."""
+    display_name: Optional[str] = None
+    scope_all_notebooks: bool
+    notebook_ids: Optional[list[int]] = None
 
 
 # --- Create schemas ---

@@ -1,0 +1,558 @@
+Overloading
+Structs, const, nullptr
+Pass-log-value
+*References*
+
+Recap
+Default
+Fn
+Params
+int
+foo (int a, String D= "hi",
+int
+C= 10) { }
+Fool1, "world", -7) || a=
+b=
+12-7
+foo (1, "world") || α = 1
+b= "world"
+C=10
+foo (1) // α=1
+b="hi"
+C= 10
+.
+• calling
+same
+Func
+multiple
+ways
+. default
+Params
+must
+appear
+last
+in
+the
+Fn
+Signature
+int
+Foolint
+a, String
+b="hi",
+int c)
+invalid
+int
+fool int
+b,
+int c)
+a= 12, String
+Overloading:
+• In
+C:
+int
+neg
+Int (int n) { return -n};
+diff names!
+int
+ney Bool (bool b) { return
+103;
+In
+C + +
+int
+bool
+neg (int n) { return -n};
+ney (bool b) { return !b};
+Same
+names!
+compiler differenciates
+↳ differ in param types
+.
+Compiler
+uses
+the
+number
+and
+types of
+a
+func trans
+parameters
+to
+determine
+which
+Function
+to
+call
+Ly decision
+is
+mudc
+at
+compile
+time
+neg (5);
+neg (false);
+→ 11-5
+→ 11 true
+Be Differing
+int
+return
+types
+is
+not
+enough
+to overload
+neg (int n) {..}
+bool neg (int o) {...}
+Error!
+difference
+Compiler
+can't
+tell the
+Default
+arguments should
+also
+be
+considered
+when
+overloading:
+int
+Fool int
+a, Int
+b= 10);
+int
+foo ( int c);
+800(5)
+ll
+What
+Foo
+to
+call?
+(error)
+Structs
+Struct
+Node {
+int
+data;
+};
+*ptr
+have
+a
+size of &
+bytes
+11 next might be
+Nude "next; Il no
+• Careful
+a
+Node
+譬
+01 null
+ptr
+(512ect(p+1)
+15
+8
+bytes)
+need
+For Struct
+Node
+•
+in
+C++
+with
+Self-referencing
+in
+Your Structs
+Struct
+Node
+int
+dataj
+Node
+nexti
+Node
+can technically
+retter en Nal (errer)
+be
+0
+size
+Since
+self
+};
+Constants
+Const
+int
+MaxGrade = 100; // must
+be
+initalized
+max Grade = ao;
+// Error can't
+mutate
+Const
+Node
+01 {5, nullptr };
+11 data = 5,
+next = nullpts
+Node
+n2 = Node (5, nullptr); // data. S,
+Const
+Node
+03: 01;
+n3 = n2;
+next null pts
+11 Error since
+08
+is
+a
+const ns is immutable
+Parameter
+Passing:
+void
+Inc (int n) { ++n; }₁
+};
+int
+x = 5;
+inc(x);
+Cout
+<< x <Lenal,
+// outputs 5!
+• Here
+we
+see
+pass
+VEHIVE >
+ουν
+function
+inc
+gets
+a
+сору
+of
+Х
+and
+increments
+that.
+Origional
+x
+is
+unchanged.
+501
+Pass
+a
+Pointer
+.
+Void (int
+*
+n){
+++
+(*n) }; Il braces are optional.
+Is
+the
+address of
+х
+in
+Memory
+x = 5
+inc (& ×); 11&x
+cout <<x<< endl; ll cut put
+61
+.
+Painters
+allow
+functions
+to
+Mutate
+params
+& var memory
+•
+inc
+address
+of
+var
+changed
+the
+data
+at
+the
+address
+OF
+×
+(8x)
+°
+Memory:
+10xB
+= &n
+10xA.
+$6
+=
+n
+☆ References ☆ (pointer-like
+int
+y =
+10;
+int &;
+&2 =
+2 = Yi
+integer
+reference
+}
+type in
+C++)
+Z
+is
+an
+Ivalue reference
+to
+an
+int
+.
+References
+arc
+like
+Constant
+pointers
+with
+automatic
+dereferencing
+(int
+cont
+2 =
+• Z is an
+allas
+to
+Y
+Z
+behaves
+exactly
+like y
+10xA..) =&z=
+10
+they are exactly
+int
+y= 10;
+int &z = yi
+2 = 12 i
+cout << 2-yi
+11 12
+With
+a
+int
+P = 82;
+ptr:
+*p = 14:
+cout <<y; 11 14
+#4
+major
+12
+tne
+Same
+in
+memory
+P
+OxB...
+limitations
+with
+Ivawe
+references
+Ⓒ Can't
+Ls must
+leave
+③
+references
+them
+Uninitalized
+*
+→ Ox A....
+z, y
+ها
+14
+be
+instalized
+with
+Something
+that
+nus
+an
+address (an Ivace)
+are
+likee
+Pointers
+int &x; errer
+int & × = 3; error
+int & x = y + z ;
+←
+int
+&x = y; 11
+works
+3 has
+no
+address
+учч exists
+temporarially
+in memny, no address
+• rvalves
+exust
+temperanally
+during that
+line
+(typically
+on
+.
+• Ivawes
+mudsey
+(3)
+memory
+Creatc
+a
+peinter
+to
+a
+reference
+Can't
+L> references
+Ly can't
+can
+int
+int
+are
+aliases
+to
+other objects
+point
+to
+a
+reference
+because
+it is
+not
+an
+have
+a
+reference
+to
+a
+ptr
+|| Errer
+8 #x;
+* & *;
+1 Okay
+Can't
+Ly int
+Create
+6&i
+4 C++
+a
+reference
+→ Error
+Syntax
+Can't
+Create
+int
+8x[3]
+Q:
+How
+=
+Far
+rvalues
+to
+a
+reference
+an
+array
+of
+references
+{^,^,^}; || Ever
+can
+I tell
+the
+difference
+between references
+the Rus)
+object itself
+&y)
+errorsi
+and
+address of?
+Ly when
+15
+Part
+of
+a
+type
+it is
+always
+a
+reference
+4 when
+is
+in
+expression
+typically
+address
+of
+int
+int
+y = 10;
+82 = 9;
+|| Ivalve reference
+int * p =
+82; 11 address of 2
+(same address
+Passing
+void
+By Reference
+inc (int &n) { ++n};
+int
+x = 5;
+inc(x);
+llequivelent
+cout << x << endli 116
+·
+changes
+to
+n
+affect
+no
+pointer
+dere foran es
+Lyn is
+an
+allas to
+as y)
+to
+dcing
+int &n= x; (works since
+you
+com
+assign
+a
+reference
+to
+an
+int
+type
+For
+n
+✓
+Why
+does
+Something
+line
+01473x
+werk?
+Ly the >>>
+operater
+tarecs
+istroam
+ant
+Int
+an
+reference!
+Std:: stream
+& operater » (std::istream &in,
+↳ return type is a
+reference
+Int &n) { ... }
+to
+the
+Same
+Stream
+(lets
+US
+do

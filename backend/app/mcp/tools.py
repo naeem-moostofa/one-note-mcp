@@ -51,7 +51,7 @@ async def onenote_list_notebooks(
     appear here at all, so an empty response means there's nothing searchable.
     """
     scope = current_scope()
-    return await NotebookService(session).list_for_user(
+    return await NotebookService(session).list_enabled_summaries(
         user_id=scope.user_id,
         filter_notebook_ids=scope.allowed_notebook_ids,
     )
@@ -111,10 +111,11 @@ async def onenote_get_page(
     """
     scope = current_scope()
     detail = await PageRepository(session).get_with_context(page_id)
-    if detail is None or detail.notebook_id not in scope.allowed_notebook_ids:
-        # Treat out-of-scope and not-found the same so guessable IDs don't
-        # leak existence to the caller.
+    if detail is None:
         raise ToolError(f"Page {page_id} not found")
+    if detail.notebook_id not in scope.allowed_notebook_ids:
+        # Distinct from "not found" but never names the owner — no ownership leak.
+        raise ToolError(f"Page {page_id} is outside this connection's scope")
     return PageContent(
         page_title=detail.page_title,
         section_name=detail.section_name,

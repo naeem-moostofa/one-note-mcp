@@ -9,6 +9,10 @@ class MCPConnectionRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def get_by_id(self, connection_id: int) -> MCPConnectionResponse | None:
+        row = await self.session.get(MCPConnection, connection_id)
+        return MCPConnectionResponse.model_validate(row) if row else None
+
     async def get_by_token_hash(self, token_hash: str) -> MCPConnectionResponse | None:
         row = await self.session.scalar(
             select(MCPConnection).where(MCPConnection.token_hash == token_hash)
