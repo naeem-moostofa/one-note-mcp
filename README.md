@@ -51,3 +51,14 @@ uv run python -m sync.run --notebook-id 1 --force
 Forces a full resync of one notebook by its database ID.
 
 Create `backend/.env` before migrations or startup; the app expects `POSTGRES_USER`, `POSTGRES_PASSWORD`, optional `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, plus Microsoft OAuth, token encryption, app session, frontend origin, and Google Cloud Vision API settings.
+
+## Python version
+
+The backend targets **Python 3.12** (pinned in `backend/.python-version`); `pyproject.toml` allows `>=3.11`. `uv` reads the pin when creating the venv.
+
+> **Windows on ARM note.** Native dependencies (`asyncpg`, `httptools`) don't publish `win_arm64` wheels, so an ARM64 interpreter would try to compile them from source and fail without Visual C++ Build Tools. Use an **x64** Python 3.12 instead — it installs from prebuilt `win_amd64` wheels under emulation. If you ever need to recreate the venv on such a machine, point uv at the x64 interpreter explicitly:
+>
+> ```powershell
+> uv venv --clear --python "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+> uv sync
+> ```

@@ -43,6 +43,7 @@ class NotebookResponse(BaseModel):
     display_name: str
     sync_enabled: bool
     sync_status: NotebookSyncStatus
+    last_synced_at: Optional[datetime] = None
 
 
 class SectionResponse(BaseModel):
