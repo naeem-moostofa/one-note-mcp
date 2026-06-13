@@ -102,10 +102,10 @@ async def _run(ids: dict[str, int]) -> None:
         _assert(all(n["sync_status"] == "PENDING" for n in nbs), "fresh notebooks carry non-null PENDING status")
         _assert(all("onenote_id" not in n and "user_id" not in n for n in nbs), "web notebook shape drops onenote_id/user_id")
 
-        # --- PATCH /api/notebooks/{id} ---
+        # --- PATCH /api/notebooks/{id} (204, no body — verify via the next GET) ---
         r = await c.patch(f"/api/notebooks/{ids['nb_enabled']}", headers=auth, json={"sync_enabled": False})
-        _assert(r.status_code == 200, f"PATCH own notebook → 200 (got {r.status_code})")
-        _assert(r.json()["sync_enabled"] is False, "toggle flipped sync_enabled to False")
+        _assert(r.status_code == 204, f"PATCH own notebook → 204 (got {r.status_code})")
+        _assert(not r.content, "204 response carries no body")
         r = await c.get("/api/notebooks", headers=auth)
         flipped = next(n for n in r.json() if n["id"] == ids["nb_enabled"])
         _assert(flipped["sync_enabled"] is False, "the flip persists on the next GET")
