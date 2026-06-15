@@ -1,0 +1,20 @@
+# Supply-chain hygiene — mirrors the backend's uv `exclude-newer = "1 week"`.
+# A version must be at least 7 days old before pnpm will install it, so a
+# freshly-published (possibly compromised) release has time to be flagged/yanked
+# before it can land here. minimumReleaseAge is in MINUTES (10080 = 7 days).
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - "@types/*"   # type stubs are low-risk; fast-track them (and urgent security fixes go here too)
+
+# Native bindings (Vite 8's rolldown bundler, lightningcss) ship as per-CPU
+# optional deps. This is a Windows-on-ARM machine, but the standalone pnpm.exe runs
+# under x64 emulation and otherwise mis-detects the CPU as x64 — so it would install
+# only the x64 binding and the arm64 Node runtime can't load it. Listing the targets
+# explicitly (additive to auto-detection) forces the correct bindings to install,
+# and keeps the project portable across machines/CI.
+supportedArchitectures:
+  os:
+    - win32
+  cpu:
+    - arm64
+    - x64
