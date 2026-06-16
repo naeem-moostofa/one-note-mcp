@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase
@@ -67,7 +68,7 @@ class Notebook(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     onenote_id = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
-    sync_enabled = Column(Boolean, nullable=False, default=True)
+    sync_enabled = Column(Boolean, nullable=False, server_default=text("false"), default=False)
     sync_status = Column(
         SAEnum(NotebookSyncStatus, name="notebook_sync_status"),
         nullable=False,

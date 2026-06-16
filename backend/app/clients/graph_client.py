@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 
-def _is_retryable(exc: BaseException) -> bool:
-    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in _RETRYABLE_STATUS_CODES
+def _is_retryable(error: BaseException) -> bool:
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in _RETRYABLE_STATUS_CODES
 
 
 def _raise_graph_api_error(retry_state) -> None:
@@ -91,8 +91,8 @@ def _parse_page_elements(html: str) -> list[GraphPageElement]:
         if text:
             positioned.append((top, left, GraphPageElement(kind="text", text=text)))
 
-    positioned.sort(key=lambda x: (x[0], x[1]))
-    return [elem for _, _, elem in positioned]
+    positioned.sort(key=lambda positioned_element: (positioned_element[0], positioned_element[1]))
+    return [element for _, _, element in positioned]
 
 
 def _parse_inkml_strokes(inkml_xml: str) -> list[InkStroke]:
@@ -132,67 +132,75 @@ def composite_page(
     (under Vision's 75 MP per-image cap, above which it silently downscales). One
     Vision call per page — no tiling.
     """
-    image_elements = [e for e in elements if e.kind == "image" and e.image_url]
+    image_elements = [element for element in elements if element.kind == "image" and element.image_url]
 
     if not image_elements and not ink_strokes:
         return None
 
     # Compute the natural (1x) canvas size first so we can pick a safe render scale.
-    base_w = max((e.left + e.width for e in image_elements), default=0.0)
-    base_h = max((e.top + e.height for e in image_elements), default=0.0)
+    base_width = max((element.left + element.width for element in image_elements), default=0.0)
+    base_height = max((element.top + element.height for element in image_elements), default=0.0)
     if ink_strokes:
-        all_px_x = [p[0] * _HIMETRIC_TO_PX_BASE for stroke in ink_strokes for p in stroke]
-        all_px_y = [p[1] * _HIMETRIC_TO_PX_BASE for stroke in ink_strokes for p in stroke]
-        if all_px_x:
-            base_w = max(base_w, max(all_px_x))
-            base_h = max(base_h, max(all_px_y))
-    base_w = max(base_w, 1.0)
-    base_h = max(base_h, 1.0)
+        all_pixel_x = [point[0] * _HIMETRIC_TO_PX_BASE for stroke in ink_strokes for point in stroke]
+        all_pixel_y = [point[1] * _HIMETRIC_TO_PX_BASE for stroke in ink_strokes for point in stroke]
+        if all_pixel_x:
+            base_width = max(base_width, max(all_pixel_x))
+            base_height = max(base_height, max(all_pixel_y))
+    base_width = max(base_width, 1.0)
+    base_height = max(base_height, 1.0)
 
     # Pick the largest scale ≤ target that keeps us under Vision's per-image pixel cap.
-    max_scale_for_vision = (_MAX_RENDER_PIXELS / (base_w * base_h)) ** 0.5
+    max_scale_for_vision = (_MAX_RENDER_PIXELS / (base_width * base_height)) ** 0.5
     render_scale = min(_TARGET_RENDER_SCALE, max_scale_for_vision)
     himetric_to_px = _HIMETRIC_TO_PX_BASE * render_scale
     stroke_width = max(1, int(_BASE_INK_STROKE_WIDTH * render_scale))
 
-    canvas_w = max(int(base_w * render_scale), 1)
-    canvas_h = max(int(base_h * render_scale), 1)
+    canvas_width = max(int(base_width * render_scale), 1)
+    canvas_height = max(int(base_height * render_scale), 1)
     if render_scale < _TARGET_RENDER_SCALE:
         logger.info(
             "composite_page: scaled to %.2fx (target %.2fx) to fit %dx%d under %d MP Vision cap",
-            render_scale, _TARGET_RENDER_SCALE, canvas_w, canvas_h, _MAX_RENDER_PIXELS // 1_000_000,
+            render_scale, _TARGET_RENDER_SCALE, canvas_width, canvas_height, _MAX_RENDER_PIXELS // 1_000_000,
         )
 
-    canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
+    canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
 
-    for elem in image_elements:
-        raw = image_bytes_map.get(elem.image_url or "")
-        if not raw:
+    for element in image_elements:
+        raw_image = image_bytes_map.get(element.image_url or "")
+        if not raw_image:
             continue
         try:
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
-            w = int(elem.width * render_scale)
-            h = int(elem.height * render_scale)
-            if w > 0 and h > 0:
-                img = img.resize((w, h), Image.LANCZOS)
-            canvas.paste(img, (int(elem.left * render_scale), int(elem.top * render_scale)))
+            image = Image.open(io.BytesIO(raw_image)).convert("RGB")
+            image_width = int(element.width * render_scale)
+            image_height = int(element.height * render_scale)
+            if image_width > 0 and image_height > 0:
+                image = image.resize((image_width, image_height), Image.LANCZOS)
+            canvas.paste(image, (int(element.left * render_scale), int(element.top * render_scale)))
         except Exception:
-            logger.warning("composite_page: failed to draw image at (%.0f, %.0f)", elem.left, elem.top)
+            logger.warning("composite_page: failed to draw image at (%.0f, %.0f)", element.left, element.top)
 
     if ink_strokes:
         draw = ImageDraw.Draw(canvas)
-        r = stroke_width // 2
+        radius = stroke_width // 2
         for stroke in ink_strokes:
-            pts = [(round(p[0] * himetric_to_px), round(p[1] * himetric_to_px)) for p in stroke]
-            if len(pts) == 1:
-                x, y = pts[0]
-                draw.ellipse([x - r, y - r, x + r, y + r], fill="black")
+            points = [(round(point[0] * himetric_to_px), round(point[1] * himetric_to_px)) for point in stroke]
+            if len(points) == 1:
+                x_position, y_position = points[0]
+                draw.ellipse(
+                    [
+                        x_position - radius,
+                        y_position - radius,
+                        x_position + radius,
+                        y_position + radius,
+                    ],
+                    fill="black",
+                )
             else:
-                draw.line(pts, fill="black", width=stroke_width, joint="curve")
+                draw.line(points, fill="black", width=stroke_width, joint="curve")
 
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    return buf.getvalue()
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 class GraphClient:
@@ -234,22 +242,22 @@ class GraphClient:
             url = f"{_BETA_URL}/me/onenote/pages/{page_id}/content?includeInkML=true"
             response = await self._get(url, access_token)
             content_type = response.headers.get("content-type", "")
-            raw = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + response.content
-            msg = email.message_from_bytes(raw)
-            for part in msg.walk():
+            raw_multipart_response = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + response.content
+            message = email.message_from_bytes(raw_multipart_response)
+            for part in message.walk():
                 if part.get_content_type() == "application/inkml+xml":
                     payload = part.get_payload(decode=True)
                     if isinstance(payload, bytes):
                         return payload.decode("utf-8", errors="replace")
             return None
-        except httpx.HTTPStatusError as exc:
+        except httpx.HTTPStatusError as error:
             logger.warning(
                 "Failed to fetch InkML for page %s: %s — response body: %s",
-                page_id, exc, exc.response.text,
+                page_id, error, error.response.text,
             )
             return None
-        except Exception as exc:
-            logger.warning("Failed to fetch InkML for page %s: %s", page_id, exc)
+        except Exception as error:
+            logger.warning("Failed to fetch InkML for page %s: %s", page_id, error)
             return None
 
     async def get_notebooks(self, access_token: str) -> list[GraphNotebook]:

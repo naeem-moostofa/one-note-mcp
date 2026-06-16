@@ -288,16 +288,16 @@ def _collect_windows(content: str, terms: list[str], search_size: int) -> list[_
             continue
         start = 0
         while True:
-            idx = lowered.find(needle, start)
-            if idx < 0:
+            match_index = lowered.find(needle, start)
+            if match_index < 0:
                 break
-            window_start = max(0, idx - search_size)
-            window_end = min(content_len, idx + len(needle) + search_size)
+            window_start = max(0, match_index - search_size)
+            window_end = min(content_len, match_index + len(needle) + search_size)
             windows.append(_Window(start=window_start, end=window_end))
             # Advance past this match. Stepping by one rather than len(needle)
             # would re-find overlapping matches like `aa` in `aaaa`, which is
-            # noise — `idx + len(needle)` is the right step here.
-            start = idx + len(needle)
+            # noise; advancing by the matched needle length is the right step here.
+            start = match_index + len(needle)
 
     return windows
 

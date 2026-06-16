@@ -177,12 +177,12 @@ async def seed():
 
 async def run_scenarios(ids):
     async with AsyncSessionLocal() as session:
-        svc = SearchService(session)
+        search_service = SearchService(session)
 
         results = {}
 
         # 1. FTS exact match — `overloading` is in CS246 content + title.
-        hits = await svc.search(
+        hits = await search_service.search(
             query="overloading",
             notebook_ids=[ids["cs_notebook_id"], ids["nets_notebook_id"], ids["personal_notebook_id"]],
         )
@@ -192,7 +192,7 @@ async def run_scenarios(ids):
         ]
 
         # 2. Trigram fuzzy fallback — `pointers` is NOT in content; OCR'd as `painters`.
-        hits = await svc.search(
+        hits = await search_service.search(
             query="pointers",
             notebook_ids=[ids["cs_notebook_id"], ids["nets_notebook_id"], ids["personal_notebook_id"]],
         )
@@ -202,7 +202,7 @@ async def run_scenarios(ids):
         ]
 
         # 3. Scope enforcement — search the CS246 term but restrict to networks notebook.
-        hits = await svc.search(
+        hits = await search_service.search(
             query="overloading",
             notebook_ids=[ids["nets_notebook_id"]],
         )
@@ -212,7 +212,7 @@ async def run_scenarios(ids):
         ]
 
         # 4. Multi-page ranking — `references` appears in both CS pages.
-        hits = await svc.search(
+        hits = await search_service.search(
             query="references",
             notebook_ids=[ids["cs_notebook_id"], ids["nets_notebook_id"]],
         )

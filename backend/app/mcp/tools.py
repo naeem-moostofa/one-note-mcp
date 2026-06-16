@@ -83,7 +83,7 @@ async def onenote_search_pages(
     """
     scope = current_scope()
     allowed = set(scope.allowed_notebook_ids)
-    scoped_notebook_ids = [nb_id for nb_id in notebook_ids if nb_id in allowed]
+    scoped_notebook_ids = [notebook_id for notebook_id in notebook_ids if notebook_id in allowed]
     if not scoped_notebook_ids:
         return []
     return await SearchService(session).search(

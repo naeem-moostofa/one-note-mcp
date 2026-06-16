@@ -3,11 +3,13 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.graph_client import GraphClient, composite_page
-from app.clients.msal_client import MSALClient
-from app.clients.ocr_client import OCRClient
+from app.clients.msal_client import MSALClient, get_msal_client
+from app.clients.ocr_client import OCRClient, get_ocr_client
+from app.core.database import AsyncSessionLocal
 from app.core.encryption import decrypt, encrypt
 from app.core.exceptions import ConflictError, MSALAuthError
 from app.models import MicrosoftConnectionStatus, NotebookSyncStatus, PageSyncStatus
@@ -72,35 +74,46 @@ class SyncService:
             graph_notebooks = await self._graph_client.get_notebooks(access_token)
             db_notebooks = await self._notebook_repo.upsert_many(
                 connection.user_id,
-                [NotebookCreate(onenote_id=n.id, display_name=n.display_name) for n in graph_notebooks],
+                [
+                    NotebookCreate(onenote_id=graph_notebook.id, display_name=graph_notebook.display_name)
+                    for graph_notebook in graph_notebooks
+                ],
             )
             logger.info("Synced %d notebooks for user %s", len(db_notebooks), connection.user_id)
 
     async def sync_single_notebook(self, notebook_id: int) -> None:
-        """Full sync for one notebook by DB id — sections and pages included."""
+        """Sync one notebook's sections + pages (+ OCR) by DB id.
+
+        Marks the notebook SYNCING, does the work, and always finalises it to FRESH
+        or FAILED — never raises on a sync failure and never leaves it stuck in
+        SYNCING. Setting SYNCING is idempotent, so it's safe whether or not the
+        caller pre-marked it (the web guard `NotebookService.start_notebook_sync`
+        does; the CLI doesn't). Uses the cron's stale-page detection
+        (`_sync_notebook` → `_sync_section`). Shared by the CLI (`--notebook-id`) and
+        the web background path; matches how the cron handles a per-notebook failure
+        (log + FAILED, no re-raise)."""
         notebook = await self._notebook_repo.get_by_id(notebook_id)
         if notebook is None:
-            raise ValueError(f"Notebook {notebook_id} not found")
-
-        connection = await self._connection_repo.get_by_user_id(notebook.user_id)
-        if connection is None:
-            raise ValueError(f"No Microsoft connection for user {notebook.user_id}")
-
-        access_token = await self._acquire_token(connection)
-        if access_token is None:
-            raise ValueError("Re-auth required — reconnect your Microsoft account")
-
+            logger.warning("sync_single_notebook: notebook %s not found", notebook_id)
+            return
         sync_started_at = datetime.now(timezone.utc)
-        await self._notebook_repo.update(notebook.id, NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING))
+        await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING))
         try:
+            connection = await self._connection_repo.get_by_user_id(notebook.user_id)
+            if connection is None:
+                raise RuntimeError(f"No Microsoft connection for user {notebook.user_id}")
+            access_token = await self._acquire_token(connection)
+            if access_token is None:
+                raise RuntimeError("Re-auth required — reconnect your Microsoft account")
             await self._sync_notebook(notebook, access_token)
             await self._notebook_repo.update(
-                notebook.id,
+                notebook_id,
                 NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at),
             )
+            logger.info("Notebook '%s' synced successfully", notebook.display_name)
         except Exception:
-            await self._notebook_repo.update(notebook.id, NotebookUpdate(sync_status=NotebookSyncStatus.FAILED))
-            raise
+            logger.exception("Failed to sync notebook '%s'", notebook.display_name)
+            await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.FAILED))
 
     async def _acquire_token(self, connection: MicrosoftConnectionResponse) -> str | None:
         """Acquire a fresh access token and save the updated cache. Returns None if re-auth needed."""
@@ -125,16 +138,19 @@ class SyncService:
     async def _discover_notebooks(self, user_id: int, access_token: str) -> list[NotebookResponse]:
         """Names-only Graph discovery: list → upsert → delete-stale. Shared by full sync and refresh."""
         graph_notebooks = await self._graph_client.get_notebooks(access_token)
-        graph_notebook_ids = {n.id for n in graph_notebooks}
+        graph_notebook_ids = {graph_notebook.id for graph_notebook in graph_notebooks}
         logger.info("Found %d notebooks in Graph", len(graph_notebooks))
 
         db_notebooks = await self._notebook_repo.upsert_many(
             user_id,
-            [NotebookCreate(onenote_id=n.id, display_name=n.display_name) for n in graph_notebooks],
+            [
+                NotebookCreate(onenote_id=graph_notebook.id, display_name=graph_notebook.display_name)
+                for graph_notebook in graph_notebooks
+            ],
         )
 
         all_db_notebooks = await self._notebook_repo.list_by_user(user_id)
-        notebooks_to_delete = [n.id for n in all_db_notebooks if n.onenote_id not in graph_notebook_ids]
+        notebooks_to_delete = [notebook.id for notebook in all_db_notebooks if notebook.onenote_id not in graph_notebook_ids]
         if notebooks_to_delete:
             logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
             await self._notebook_repo.delete_many(notebooks_to_delete)
@@ -161,14 +177,18 @@ class SyncService:
 
         db_notebooks = await self._discover_notebooks(connection.user_id, access_token)
 
-        enabled_notebooks = [n for n in db_notebooks if n.sync_enabled]
+        enabled_notebooks = [notebook for notebook in db_notebooks if notebook.sync_enabled]
         if not enabled_notebooks:
             logger.info("No sync-enabled notebooks — nothing to do")
             return
 
-        logger.info("Syncing %d notebooks: %s", len(enabled_notebooks), [n.display_name for n in enabled_notebooks])
+        logger.info(
+            "Syncing %d notebooks: %s",
+            len(enabled_notebooks),
+            [notebook.display_name for notebook in enabled_notebooks],
+        )
         await self._notebook_repo.update_many(
-            [n.id for n in enabled_notebooks],
+            [notebook.id for notebook in enabled_notebooks],
             NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING),
         )
 
@@ -192,16 +212,19 @@ class SyncService:
         logger.info("Syncing notebook '%s' (last synced: %s)", notebook.display_name, notebook.last_synced_at or "never")
 
         graph_sections = await self._graph_client.get_sections(access_token, notebook.onenote_id)
-        graph_section_ids = {s.id for s in graph_sections}
+        graph_section_ids = {graph_section.id for graph_section in graph_sections}
         logger.info("  Found %d sections", len(graph_sections))
 
         db_sections = await self._section_repo.upsert_many(
             notebook.id,
-            [SectionCreate(onenote_id=s.id, display_name=s.display_name) for s in graph_sections],
+            [
+                SectionCreate(onenote_id=graph_section.id, display_name=graph_section.display_name)
+                for graph_section in graph_sections
+            ],
         )
 
         all_db_sections = await self._section_repo.list_by_notebook(notebook.id)
-        sections_to_delete = [s.id for s in all_db_sections if s.onenote_id not in graph_section_ids]
+        sections_to_delete = [section.id for section in all_db_sections if section.onenote_id not in graph_section_ids]
         if sections_to_delete:
             logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
             await self._section_repo.delete_many(sections_to_delete)
@@ -215,20 +238,20 @@ class SyncService:
 
         if not graph_pages:
             logger.info("    Section '%s': no pages in Graph", section.display_name)
-            pages_to_delete = [p.id for p in existing_db_pages]
+            pages_to_delete = [page.id for page in existing_db_pages]
             if pages_to_delete:
                 await self._page_repo.delete_many(pages_to_delete)
             return
 
-        graph_pages_map = {p.id: p for p in graph_pages}
+        graph_pages_map = {page.id: page for page in graph_pages}
 
         db_pages = await self._page_repo.upsert_many(
             section.id,
-            [PageCreate(onenote_id=p.id, title=p.title) for p in graph_pages],
+            [PageCreate(onenote_id=graph_page.id, title=graph_page.title) for graph_page in graph_pages],
         )
-        db_pages_map = {p.onenote_id: p for p in db_pages}
+        db_pages_map = {page.onenote_id: page for page in db_pages}
 
-        pages_to_delete = [p.id for p in existing_db_pages if p.onenote_id not in graph_pages_map]
+        pages_to_delete = [page.id for page in existing_db_pages if page.onenote_id not in graph_pages_map]
         if pages_to_delete:
             logger.info("    Section '%s': deleting %d pages removed from Graph", section.display_name, len(pages_to_delete))
             await self._page_repo.delete_many(pages_to_delete)
@@ -270,8 +293,8 @@ class SyncService:
         try:
             page_content = await self._graph_client.get_page_content_with_ink(access_token, page.onenote_id)
 
-            text_elements = [e for e in page_content.elements if e.kind == "text" and e.text]
-            image_elements = [e for e in page_content.elements if e.kind == "image" and e.image_url]
+            text_elements = [element for element in page_content.elements if element.kind == "text" and element.text]
+            image_elements = [element for element in page_content.elements if element.kind == "image" and element.image_url]
 
             logger.info(
                 "        %d text block(s), %d image(s), handwriting=%s",
@@ -283,7 +306,7 @@ class SyncService:
             # Fetch all images in parallel
             image_bytes_map: dict[str, bytes] = {}
             if image_elements:
-                urls = [e.image_url for e in image_elements]
+                urls = [element.image_url for element in image_elements]
                 results = await asyncio.gather(
                     *[self._graph_client.get_page_image(access_token, url) for url in urls],
                     return_exceptions=True,
@@ -307,7 +330,7 @@ class SyncService:
                     logger.info("        Composite built but OCR client not loaded — skipping")
 
             # Assemble: typed text in visual order, then composite OCR
-            text_parts = [e.text for e in text_elements if e.text]
+            text_parts = [element.text for element in text_elements if element.text]
             if ocr_text:
                 text_parts.append(ocr_text)
 
@@ -325,3 +348,28 @@ class SyncService:
         except Exception:
             logger.exception("      Failed to sync content for page '%s'", page.title or page.onenote_id)
             await self._page_repo.update(page.id, PageUpdate(sync_status=PageSyncStatus.FAILED))
+
+
+async def run_notebook_sync_background(notebook_id: int) -> None:
+    """Self-contained background entry point for a web-triggered notebook sync.
+
+    Owns the whole lifecycle so the router doesn't have to: its own HTTP + DB
+    session (the request's session is already closed), the MSAL + OCR clients, and
+    commit/rollback. Delegates the actual work to `SyncService.sync_single_notebook`,
+    which finalises the notebook to FRESH/FAILED. Mirrors `sync/run.py`'s wiring for
+    a single notebook. The notebook is expected to already be marked SYNCING by
+    `NotebookService.start_notebook_sync` before this is scheduled."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
+        async with AsyncSessionLocal() as session:
+            service = SyncService(
+                session=session,
+                graph_client=GraphClient(http_client),
+                msal_client=get_msal_client(),
+                ocr_client=get_ocr_client(),
+            )
+            try:
+                await service.sync_single_notebook(notebook_id)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception("Background sync crashed for notebook %s", notebook_id)

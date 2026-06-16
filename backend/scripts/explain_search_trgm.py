@@ -84,7 +84,7 @@ async def main():
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Notebook.id))
-        notebook_ids = [r[0] for r in result.all()]
+        notebook_ids = [row[0] for row in result.all()]
         if not notebook_ids:
             print("No notebooks in DB. Seed first.")
             return

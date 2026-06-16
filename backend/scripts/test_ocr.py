@@ -49,8 +49,8 @@ class _ResolvedPage(BaseModel):
     user_id: int
 
 
-def _safe_filename(s: str, max_len: int = 50) -> str:
-    cleaned = re.sub(r"[^\w\-]+", "_", s).strip("_")
+def _safe_filename(value: str, max_len: int = 50) -> str:
+    cleaned = re.sub(r"[^\w\-]+", "_", value).strip("_")
     return (cleaned or "untitled")[:max_len]
 
 
@@ -83,8 +83,8 @@ async def _resolve_page(
         raise SystemExit("No matching page found in DB.")
     if len(rows) > 1:
         listing = "\n".join(
-            f"  - page_id={p.id} title={p.title!r} section={s.display_name!r} notebook={n.display_name!r}"
-            for p, s, n in rows
+            f"  - page_id={page.id} title={page.title!r} section={section.display_name!r} notebook={notebook_row.display_name!r}"
+            for page, section, notebook_row in rows
         )
         raise SystemExit(f"Multiple pages match — narrow with --page-id or --notebook:\n{listing}")
 
@@ -100,13 +100,13 @@ async def _resolve_page(
 
 
 async def _acquire_token(session: AsyncSession, user_id: int) -> str:
-    conn = await session.scalar(
+    connection = await session.scalar(
         select(MicrosoftConnection).where(MicrosoftConnection.user_id == user_id)
     )
-    if conn is None:
+    if connection is None:
         raise SystemExit(f"No Microsoft connection for user {user_id}")
     try:
-        result = get_msal_client().acquire_token_silent(decrypt(conn.encrypted_msal_token_cache))
+        result = get_msal_client().acquire_token_silent(decrypt(connection.encrypted_msal_token_cache))
     except MSALAuthError:
         raise SystemExit("Re-auth required — reconnect your Microsoft account via the app first.")
     return result.access_token
@@ -137,8 +137,8 @@ async def main(
         logger.info("Fetching page HTML + InkML from Graph...")
         page_content = await graph_client.get_page_content_with_ink(access_token, resolved.page_onenote_id)
 
-        text_elements = [e for e in page_content.elements if e.kind == "text" and e.text]
-        image_elements = [e for e in page_content.elements if e.kind == "image" and e.image_url]
+        text_elements = [element for element in page_content.elements if element.kind == "text" and element.text]
+        image_elements = [element for element in page_content.elements if element.kind == "image" and element.image_url]
 
         logger.info(
             "Parsed: %d text block(s), %d image(s), has_handwriting=%s, ink_strokes=%d",
@@ -150,7 +150,7 @@ async def main(
         image_bytes_map: dict[str, bytes] = {}
         if image_elements:
             logger.info("Fetching %d image(s) in parallel...", len(image_elements))
-            urls = [e.image_url for e in image_elements]
+            urls = [element.image_url for element in image_elements]
             results = await asyncio.gather(
                 *[graph_client.get_page_image(access_token, url) for url in urls],
                 return_exceptions=True,
@@ -177,7 +177,7 @@ async def main(
             len(composite_bytes) // 1024,
         )
 
-    typed_text = "\n\n".join(e.text for e in text_elements if e.text)
+    typed_text = "\n\n".join(element.text for element in text_elements if element.text)
     (target_dir / "typed-text.txt").write_text(typed_text, encoding="utf-8")
     logger.info("Wrote typed-text.txt (%d chars)", len(typed_text))
 
@@ -190,7 +190,7 @@ async def main(
     elif skip_ocr:
         logger.info("--skip-ocr set — skipping Vision API call")
 
-    final_parts = [e.text for e in text_elements if e.text]
+    final_parts = [element.text for element in text_elements if element.text]
     if ocr_text:
         final_parts.append(ocr_text)
     final_content = "\n\n".join(final_parts)

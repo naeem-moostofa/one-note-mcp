@@ -54,7 +54,7 @@ class MCPConnectionService:
             return None
 
         user_notebooks = await self._notebook_repo.list_by_user(connection.user_id)
-        sync_enabled_ids = {nb.id for nb in user_notebooks if nb.sync_enabled}
+        sync_enabled_ids = {notebook.id for notebook in user_notebooks if notebook.sync_enabled}
         if connection.scope_all_notebooks:
             allowed = sorted(sync_enabled_ids)
         else:
@@ -84,7 +84,7 @@ class MCPConnectionService:
         if not scope_all_notebooks:
             if not notebook_ids:
                 raise InvalidRequestError("notebook_ids required when scope_all_notebooks is False")
-            owned = {nb.id for nb in await self._notebook_repo.list_by_user(user_id)}
+            owned = {notebook.id for notebook in await self._notebook_repo.list_by_user(user_id)}
             if not set(notebook_ids).issubset(owned):
                 # Non-leaking: doesn't reveal which id is unowned.
                 raise InvalidRequestError("one or more notebook_ids are invalid")
@@ -114,10 +114,10 @@ class MCPConnectionService:
 
     async def revoke(self, user_id: int, connection_id: int) -> None:
         """Set revoked_at — 404 if the connection doesn't exist, 403 if it isn't owned."""
-        conn = await self._repo.get_by_id(connection_id)
-        if conn is None:
+        connection = await self._repo.get_by_id(connection_id)
+        if connection is None:
             raise ResourceNotFoundError("Connection not found")
-        if conn.user_id != user_id:
+        if connection.user_id != user_id:
             raise ForbiddenError("Not your connection")
         await self._repo.update(
             connection_id,

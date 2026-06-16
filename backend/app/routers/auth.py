@@ -55,8 +55,8 @@ async def callback(
 
     try:
         token = await service.complete_login(flow, auth_response)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
     response = RedirectResponse(url=f"{settings.FRONTEND_ORIGIN}?token={token}", status_code=302)
     response.delete_cookie(key=_COOKIE_NAME)

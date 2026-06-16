@@ -32,6 +32,10 @@ class MSALClient:
             scopes=self._scopes,
             redirect_uri=settings.MICROSOFT_REDIRECT_URI,
             state=state,
+            # Always show the account picker instead of silently reusing whichever
+            # Microsoft session the browser already has — lets the user choose (and
+            # makes connecting a different account possible).
+            prompt="select_account",
         )
         return MSALAuthCodeFlow(**flow)
 
@@ -43,8 +47,8 @@ class MSALClient:
                 auth_code_flow=auth_code_flow.model_dump(),
                 auth_response=auth_response,
             )
-        except ValueError as e:
-            raise MSALAuthError(str(e)) from e
+        except ValueError as error:
+            raise MSALAuthError(str(error)) from error
         if "error" in result:
             raise MSALAuthError(result.get("error_description", result["error"]))
         return MSALTokenResult(

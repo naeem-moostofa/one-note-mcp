@@ -45,72 +45,72 @@ log = logging.getLogger("smoke_mcp")
 
 async def _seed():
     """Insert a minimal corpus. Returns the created IDs."""
-    async with AsyncSessionLocal() as s:
+    async with AsyncSessionLocal() as session:
         user = User(microsoft_oid="smoke-oid", email="smoke@example.com", display_name="Smoke User")
-        s.add(user)
-        await s.flush()
+        session.add(user)
+        await session.flush()
 
-        nb_a = Notebook(user_id=user.id, onenote_id="nb-a", display_name="CS 246", sync_enabled=True)
-        nb_b = Notebook(user_id=user.id, onenote_id="nb-b", display_name="Personal", sync_enabled=True)
-        nb_c = Notebook(
+        cs_notebook = Notebook(user_id=user.id, onenote_id="nb-a", display_name="CS 246", sync_enabled=True)
+        personal_notebook = Notebook(user_id=user.id, onenote_id="nb-b", display_name="Personal", sync_enabled=True)
+        archive_notebook = Notebook(
             user_id=user.id,
             onenote_id="nb-c",
             display_name="Archive",
             sync_enabled=False,  # not searchable; should be filtered out of scope
         )
-        s.add_all([nb_a, nb_b, nb_c])
-        await s.flush()
+        session.add_all([cs_notebook, personal_notebook, archive_notebook])
+        await session.flush()
 
-        sec_a = Section(notebook_id=nb_a.id, onenote_id="sec-a", display_name="Lecture 4")
-        sec_b = Section(notebook_id=nb_b.id, onenote_id="sec-b", display_name="Notes")
-        s.add_all([sec_a, sec_b])
-        await s.flush()
+        lecture_section = Section(notebook_id=cs_notebook.id, onenote_id="sec-a", display_name="Lecture 4")
+        notes_section = Section(notebook_id=personal_notebook.id, onenote_id="sec-b", display_name="Notes")
+        session.add_all([lecture_section, notes_section])
+        await session.flush()
 
-        p1 = Page(
-            section_id=sec_a.id,
+        pointers_page = Page(
+            section_id=lecture_section.id,
             onenote_id="pg-1",
             title="Pointers",
             content="A pointer holds the address of another variable. Pointer arithmetic in C lets you traverse arrays.",
             content_hash="h1",
         )
-        p2 = Page(
-            section_id=sec_a.id,
+        memory_page = Page(
+            section_id=lecture_section.id,
             onenote_id="pg-2",
             title="Memory",
             content="Stack vs heap allocation; manual free() is required for malloc'd buffers.",
             content_hash="h2",
             sync_status=PageSyncStatus.SYNCING,  # exercises the stale path
         )
-        p3 = Page(
-            section_id=sec_b.id,
+        grocery_page = Page(
+            section_id=notes_section.id,
             onenote_id="pg-3",
             title="Grocery list",
             content="Apples, oranges, bread, butter.",
             content_hash="h3",
         )
-        s.add_all([p1, p2, p3])
+        session.add_all([pointers_page, memory_page, grocery_page])
         # Notebook B is mid-sync — every hit/page in it should be `stale: True`.
-        nb_b.sync_status = NotebookSyncStatus.SYNCING
-        nb_b.last_synced_at = datetime.now(timezone.utc)
+        personal_notebook.sync_status = NotebookSyncStatus.SYNCING
+        personal_notebook.last_synced_at = datetime.now(timezone.utc)
 
-        await s.commit()
+        await session.commit()
         return {
             "user_id": user.id,
-            "nb_a": nb_a.id,
-            "nb_b": nb_b.id,
-            "nb_c": nb_c.id,
-            "page_pointers": p1.id,
-            "page_memory_syncing": p2.id,
-            "page_grocery": p3.id,
+            "cs_notebook": cs_notebook.id,
+            "personal_notebook": personal_notebook.id,
+            "archive_notebook": archive_notebook.id,
+            "page_pointers": pointers_page.id,
+            "page_memory_syncing": memory_page.id,
+            "page_grocery": grocery_page.id,
         }
 
 
 async def _teardown(user_id: int):
-    async with AsyncSessionLocal() as s:
-        user = await s.get(User, user_id)
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, user_id)
         if user:
-            await s.delete(user)
-        await s.commit()
+            await session.delete(user)
+        await session.commit()
 
 
 def _assert(cond: bool, message: str) -> None:
@@ -121,13 +121,13 @@ def _assert(cond: bool, message: str) -> None:
 
 async def _run(ids: dict[str, int]) -> None:
     # 1. Create + resolve a connection scoped to all notebooks.
-    async with AsyncSessionLocal() as s:
-        created = await MCPConnectionService(s).create(
+    async with AsyncSessionLocal() as session:
+        created = await MCPConnectionService(session).create(
             user_id=ids["user_id"],
             scope_all_notebooks=True,
             display_name="smoke test",
         )
-        await s.commit()
+        await session.commit()
     conn_id = created.id
     raw_token = created.raw_token
     _assert(created.scope_all_notebooks is True, "MCPConnectionCreatedResponse echoes the scope_all_notebooks flag")
@@ -135,21 +135,21 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(created.display_name == "smoke test", "display_name round-trips")
     log.info("Created connection %d with raw token len=%d", conn_id, len(raw_token))
 
-    async with AsyncSessionLocal() as s:
-        scope = await MCPConnectionService(s).resolve_token(raw_token)
-        await s.commit()
+    async with AsyncSessionLocal() as session:
+        scope = await MCPConnectionService(session).resolve_token(raw_token)
+        await session.commit()
     _assert(scope is not None, "resolve_token returned a scope")
     assert scope is not None
     _assert(scope.user_id == ids["user_id"], "scope.user_id matches the owning user")
     _assert(
-        set(scope.allowed_notebook_ids) == {ids["nb_a"], ids["nb_b"]},
+        set(scope.allowed_notebook_ids) == {ids["cs_notebook"], ids["personal_notebook"]},
         "scope_all_notebooks intersects with sync_enabled — excludes the disabled notebook",
     )
 
     # 2. NotebookService.list_enabled_summaries reflects the same intersection
     #    when the caller supplies the scope's allowed_notebook_ids as the filter.
-    async with AsyncSessionLocal() as s:
-        notebooks = await NotebookService(s).list_enabled_summaries(
+    async with AsyncSessionLocal() as session:
+        notebooks = await NotebookService(session).list_enabled_summaries(
             user_id=scope.user_id,
             filter_notebook_ids=scope.allowed_notebook_ids,
         )
@@ -157,8 +157,8 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(names == ["CS 246", "Personal"], f"list_enabled_summaries(filter=…) returned {names!r}")
 
     # Also verify the service is scope-blind: no filter = all sync-enabled.
-    async with AsyncSessionLocal() as s:
-        all_synced = await NotebookService(s).list_enabled_summaries(user_id=scope.user_id)
+    async with AsyncSessionLocal() as session:
+        all_synced = await NotebookService(session).list_enabled_summaries(user_id=scope.user_id)
     all_names = sorted(n.display_name for n in all_synced)
     _assert(all_names == ["CS 246", "Personal"], f"list_enabled_summaries(no filter) returned {all_names!r}")
     _assert(
@@ -167,8 +167,8 @@ async def _run(ids: dict[str, int]) -> None:
     )
 
     # 3. SearchService.search via the same path the MCP tool will take.
-    async with AsyncSessionLocal() as s:
-        hits = await SearchService(s).search(
+    async with AsyncSessionLocal() as session:
+        hits = await SearchService(session).search(
             query="pointer",
             notebook_ids=scope.allowed_notebook_ids,
             search_size=80,
@@ -190,20 +190,20 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(pointer_hit.stale is False, "the Pointers hit is not stale (notebook + page healthy)")
 
     # 4. Hit from notebook B (which is mid-sync) → stale: True.
-    async with AsyncSessionLocal() as s:
-        b_hits = await SearchService(s).search(
+    async with AsyncSessionLocal() as session:
+        personal_hits = await SearchService(session).search(
             query="apples",
-            notebook_ids=[ids["nb_b"]],
+            notebook_ids=[ids["personal_notebook"]],
             search_size=80,
             max_pages=5,
             max_snippets_per_page=3,
         )
-    _assert(len(b_hits) == 1, "search in notebook B found the grocery page")
-    _assert(b_hits[0].stale is True, "grocery hit is stale because notebook B is SYNCING")
+    _assert(len(personal_hits) == 1, "search in notebook B found the grocery page")
+    _assert(personal_hits[0].stale is True, "grocery hit is stale because notebook B is SYNCING")
 
     # 5. get_with_context — the previously buggy method, now fixed.
-    async with AsyncSessionLocal() as s:
-        detail = await PageRepository(s).get_with_context(ids["page_pointers"])
+    async with AsyncSessionLocal() as session:
+        detail = await PageRepository(session).get_with_context(ids["page_pointers"])
     _assert(detail is not None, "get_with_context returned the page")
     assert detail is not None
     _assert(detail.page_title == "Pointers", "detail.page_title is Pointers")
@@ -212,16 +212,16 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(detail.content is not None and "pointer" in detail.content.lower(), "detail.content includes the page text")
     _assert(detail.notebook_last_synced_at is None, "CS 246 has not been synced, so last_synced_at is None")
 
-    async with AsyncSessionLocal() as s:
-        detail_b = await PageRepository(s).get_with_context(ids["page_grocery"])
-    _assert(detail_b is not None, "get_with_context returned the grocery page")
-    assert detail_b is not None
+    async with AsyncSessionLocal() as session:
+        personal_detail = await PageRepository(session).get_with_context(ids["page_grocery"])
+    _assert(personal_detail is not None, "get_with_context returned the grocery page")
+    assert personal_detail is not None
     _assert(
-        detail_b.notebook_sync_status == NotebookSyncStatus.SYNCING,
+        personal_detail.notebook_sync_status == NotebookSyncStatus.SYNCING,
         "notebook_sync_status comes through from the notebook (the bug-fix verification)",
     )
     _assert(
-        detail_b.notebook_last_synced_at is not None,
+        personal_detail.notebook_last_synced_at is not None,
         "notebook_last_synced_at is populated from Notebook.last_synced_at (the column that actually exists)",
     )
 
@@ -234,7 +234,7 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(access.client_id == str(ids["user_id"]), "AccessToken.client_id is the owning user id (str)")
     _assert(access.scopes == [], "AccessToken.scopes is empty — we don't model OAuth scopes")
     _assert(
-        set(access.claims["onenote_mcp_allowed_notebook_ids"]) == {ids["nb_a"], ids["nb_b"]},
+        set(access.claims["onenote_mcp_allowed_notebook_ids"]) == {ids["cs_notebook"], ids["personal_notebook"]},
         "AccessToken.claims carries the resolved notebook scope",
     )
     _assert(
@@ -246,33 +246,33 @@ async def _run(ids: dict[str, int]) -> None:
     _assert(bad_access is None, "TokenVerifier returns None for unknown tokens (FastMCP responds 401)")
 
     # 7. Revoke flow.
-    async with AsyncSessionLocal() as s:
-        await MCPConnectionService(s).revoke(user_id=ids["user_id"], connection_id=conn_id)
-        await s.commit()
-    async with AsyncSessionLocal() as s:
-        revoked_scope = await MCPConnectionService(s).resolve_token(raw_token)
+    async with AsyncSessionLocal() as session:
+        await MCPConnectionService(session).revoke(user_id=ids["user_id"], connection_id=conn_id)
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        revoked_scope = await MCPConnectionService(session).resolve_token(raw_token)
     _assert(revoked_scope is None, "revoked tokens no longer resolve via the service")
 
     revoked_access = await verifier.verify_token(raw_token)
     _assert(revoked_access is None, "TokenVerifier returns None for revoked tokens too")
 
     # 8. Out-of-scope (notebook_ids not in connection scope) — caller-side check.
-    async with AsyncSessionLocal() as s:
-        narrow_created = await MCPConnectionService(s).create(
+    async with AsyncSessionLocal() as session:
+        narrow_created = await MCPConnectionService(session).create(
             user_id=ids["user_id"],
             scope_all_notebooks=False,
-            notebook_ids=[ids["nb_a"]],
+            notebook_ids=[ids["cs_notebook"]],
             display_name="scoped to CS 246 only",
         )
-        await s.commit()
+        await session.commit()
     _assert(narrow_created.scope_all_notebooks is False, "narrow connection has scope_all_notebooks=False")
-    _assert(narrow_created.notebook_ids == [ids["nb_a"]], "narrow connection echoes the requested notebook_ids in the response")
-    async with AsyncSessionLocal() as s:
-        narrow_scope = await MCPConnectionService(s).resolve_token(narrow_created.raw_token)
-        await s.commit()
+    _assert(narrow_created.notebook_ids == [ids["cs_notebook"]], "narrow connection echoes the requested notebook_ids in the response")
+    async with AsyncSessionLocal() as session:
+        narrow_scope = await MCPConnectionService(session).resolve_token(narrow_created.raw_token)
+        await session.commit()
     assert narrow_scope is not None
     _assert(
-        narrow_scope.allowed_notebook_ids == [ids["nb_a"]],
+        narrow_scope.allowed_notebook_ids == [ids["cs_notebook"]],
         "narrow connection only allows CS 246",
     )
 

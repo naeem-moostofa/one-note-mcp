@@ -42,5 +42,5 @@ app.mount("/mcp", mcp_app)
 
 # Maps domain errors → HTTP via each error's own status_code.
 @app.exception_handler(AppError)
-async def _app_error_handler(request, exc: AppError):
-    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc) or exc.__class__.__name__})
+async def _app_error_handler(request, error: AppError):
+    return JSONResponse(status_code=error.status_code, content={"detail": str(error) or error.__class__.__name__})
