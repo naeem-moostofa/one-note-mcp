@@ -136,6 +136,15 @@ class NotebookWebResponse(BaseModel):
     last_modified_datetime: Optional[datetime] = None
 
 
+class NotebookFilter(BaseModel):
+    """Query filters + pagination for GET /api/notebooks."""
+    search: Optional[str] = Field(default=None, max_length=100)
+    sync_enabled: Optional[bool] = None
+    sync_status: Optional[NotebookSyncStatus] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
 class MCPConnectionWebResponse(BaseModel):
     """MCP connection as listed on the web — no token material (the router's
     response_model strips token_hash/user_id from the internal shape)."""

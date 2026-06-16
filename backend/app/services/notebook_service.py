@@ -7,7 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ForbiddenError, ResourceNotFoundError
 from app.models import NotebookSyncStatus
 from app.repositories.notebook_repository import NotebookRepository
-from app.schemas import NotebookSummary, NotebookUpdate, NotebookWebResponse
+from app.schemas import (
+    NotebookFilter,
+    NotebookSummary,
+    NotebookUpdate,
+    NotebookWebResponse,
+    PaginatedResponse,
+)
 
 
 class NotebookService:
@@ -28,20 +34,29 @@ class NotebookService:
             if notebook.sync_enabled and (allowed is None or notebook.id in allowed)
         ]
 
-    async def list_for_user(self, user_id: int) -> list[NotebookWebResponse]:
-        """Web: every notebook the user owns (enabled and disabled) with sync state."""
-        notebooks = await self._notebook_repo.list_by_user(user_id)
-        return [
-            NotebookWebResponse(
-                id=notebook.id,
-                display_name=notebook.display_name,
-                sync_enabled=notebook.sync_enabled,
-                sync_status=notebook.sync_status,
-                last_synced_at=notebook.last_synced_at,
-                last_modified_datetime=notebook.last_modified_datetime,
-            )
-            for notebook in notebooks
-        ]
+    async def list_for_user(
+        self, user_id: int, filters: NotebookFilter
+    ) -> PaginatedResponse[NotebookWebResponse]:
+        """Web: one filtered, paginated page of the user's notebooks (enabled and
+        disabled) with sync state. Projects the internal rows to the web shape and
+        preserves total/limit/offset from the repository."""
+        page = await self._notebook_repo.list_page_by_user(user_id, filters)
+        return PaginatedResponse(
+            data=[
+                NotebookWebResponse(
+                    id=notebook.id,
+                    display_name=notebook.display_name,
+                    sync_enabled=notebook.sync_enabled,
+                    sync_status=notebook.sync_status,
+                    last_synced_at=notebook.last_synced_at,
+                    last_modified_datetime=notebook.last_modified_datetime,
+                )
+                for notebook in page.data
+            ],
+            total=page.total,
+            limit=page.limit,
+            offset=page.offset,
+        )
 
     async def set_sync_enabled(self, user_id: int, notebook_id: int, enabled: bool) -> None:
         """Flip sync_enabled — 404 if the notebook doesn't exist, 403 if it isn't owned.

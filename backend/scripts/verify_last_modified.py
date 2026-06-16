@@ -33,6 +33,7 @@ from app.clients.graph_client import GraphClient
 from app.clients.msal_client import get_msal_client
 from app.clients.ocr_client import get_ocr_client
 from app.core.database import AsyncSessionLocal, engine
+from app.schemas import NotebookFilter
 from app.services.notebook_service import NotebookService
 from app.services.sync_service import SyncService
 
@@ -170,8 +171,8 @@ async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: 
 
             # --- Phase 3: web response carries the field ---
             log.info("Phase 3: NotebookService.list_for_user web response shape…")
-            web = await notebook_service.list_for_user(user_id)
-            web_chosen = next((nb for nb in web if nb.id == chosen_db.id), None)
+            web_page = await notebook_service.list_for_user(user_id, NotebookFilter(limit=100))
+            web_chosen = next((nb for nb in web_page.data if nb.id == chosen_db.id), None)
             _assert(web_chosen is not None, "synced notebook appears in the web response")
             _assert(
                 hasattr(web_chosen, "last_modified_datetime") and _close(web_chosen.last_modified_datetime, expected_max),

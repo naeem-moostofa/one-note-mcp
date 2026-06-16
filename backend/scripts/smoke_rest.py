@@ -94,20 +94,47 @@ async def _run(ids: dict[str, int]) -> None:
         _assert(body["microsoft_status"] == "ACTIVE", "me.microsoft_status is ACTIVE")
         _assert("encrypted_msal_token_cache" not in body, "me payload never includes the MSAL cache")
 
-        # --- GET /api/notebooks (all, including disabled) ---
+        # --- GET /api/notebooks (paginated envelope; all, including disabled) ---
         response = await client.get("/api/notebooks", headers=authorization_header)
         _assert(response.status_code == 200, f"GET /api/notebooks → 200 (got {response.status_code})")
-        notebooks = response.json()
+        page = response.json()
+        _assert(set(page.keys()) == {"data", "total", "limit", "offset"}, "response is the PaginatedResponse envelope")
+        _assert(page["limit"] == 50 and page["offset"] == 0, f"defaults to limit=50, offset=0 (got {page['limit']}, {page['offset']})")
+        notebooks = page["data"]
+        _assert(page["total"] == 2, f"total counts both of the user's notebooks (got {page['total']})")
         _assert(len(notebooks) == 2, f"returns both of the user's notebooks incl. disabled (got {len(notebooks)})")
         _assert(all(notebook["sync_status"] == "PENDING" for notebook in notebooks), "fresh notebooks carry non-null PENDING status")
         _assert(all("onenote_id" not in notebook and "user_id" not in notebook for notebook in notebooks), "web notebook shape drops onenote_id/user_id")
+
+        # alphabetical fallback order (both notebooks have NULL last_modified → name, id): "Disabled NB" before "Enabled NB"
+        _assert([nb["display_name"] for nb in notebooks] == ["Disabled NB", "Enabled NB"], "rows are ordered deterministically (name fallback when last edited is NULL)")
+
+        # --- pagination: limit/offset walk the sorted rows ---
+        response = await client.get("/api/notebooks", headers=authorization_header, params={"limit": 1, "offset": 1})
+        _assert(response.status_code == 200, f"GET with limit=1&offset=1 → 200 (got {response.status_code})")
+        second_page = response.json()
+        _assert(second_page["total"] == 2, "total stays the full match count regardless of limit/offset")
+        _assert(len(second_page["data"]) == 1 and second_page["data"][0]["display_name"] == "Enabled NB", "limit=1&offset=1 returns the second sorted row")
+
+        # --- filters apply before counting/paginating ---
+        response = await client.get("/api/notebooks", headers=authorization_header, params={"sync_enabled": "false"})
+        filtered = response.json()
+        _assert(filtered["total"] == 1 and filtered["data"][0]["display_name"] == "Disabled NB", "sync_enabled=false filters before counting")
+        response = await client.get("/api/notebooks", headers=authorization_header, params={"search": "Enabled"})
+        searched = response.json()
+        _assert(searched["total"] == 1 and searched["data"][0]["display_name"] == "Enabled NB", "search filters before counting")
+
+        # --- pagination validation errors ---
+        for bad_params in ({"limit": 0}, {"limit": 999}, {"offset": -1}):
+            response = await client.get("/api/notebooks", headers=authorization_header, params=bad_params)
+            _assert(response.status_code == 422, f"GET with {bad_params} → 422 validation error (got {response.status_code})")
 
         # --- PATCH /api/notebooks/{id} (204, no body — verify via the next GET) ---
         response = await client.patch(f"/api/notebooks/{ids['enabled_notebook']}", headers=authorization_header, json={"sync_enabled": False})
         _assert(response.status_code == 204, f"PATCH own notebook → 204 (got {response.status_code})")
         _assert(not response.content, "204 response carries no body")
         response = await client.get("/api/notebooks", headers=authorization_header)
-        flipped = next(notebook for notebook in response.json() if notebook["id"] == ids["enabled_notebook"])
+        flipped = next(notebook for notebook in response.json()["data"] if notebook["id"] == ids["enabled_notebook"])
         _assert(flipped["sync_enabled"] is False, "the flip persists on the next GET")
 
         # cross-user 403 + missing 404

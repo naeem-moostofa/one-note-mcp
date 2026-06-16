@@ -1,9 +1,34 @@
-from sqlalchemy import delete, select, update
+from sqlalchemy import ColumnElement, delete, func, nullslast, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Notebook
-from app.schemas import NotebookCreate, NotebookResponse, NotebookUpdate
+from app.schemas import (
+    NotebookCreate,
+    NotebookFilter,
+    NotebookResponse,
+    NotebookUpdate,
+    PaginatedResponse,
+)
+
+# Canonical web ordering: most-recently-edited first, never-synced (NULL) notebooks
+# last, name + id to keep duplicates/ties deterministic across pages. Mirrors what the
+# dashboard wants ("sort by last edited") and makes DB pagination consistent with it.
+_WEB_ORDER = (nullslast(Notebook.last_modified_datetime.desc()), func.lower(Notebook.display_name), Notebook.id)
+
+
+def _filter_conditions(user_id: int, filters: NotebookFilter) -> list[ColumnElement[bool]]:
+    """Shared WHERE predicates so the total count and the row page filter identically."""
+    conditions: list[ColumnElement[bool]] = [Notebook.user_id == user_id]
+    if filters.search:
+        search = filters.search.strip()
+        if search:
+            conditions.append(Notebook.display_name.ilike(f"%{search}%"))
+    if filters.sync_enabled is not None:
+        conditions.append(Notebook.sync_enabled == filters.sync_enabled)
+    if filters.sync_status is not None:
+        conditions.append(Notebook.sync_status == filters.sync_status)
+    return conditions
 
 
 class NotebookRepository:
@@ -15,8 +40,39 @@ class NotebookRepository:
         return NotebookResponse.model_validate(row) if row else None
 
     async def list_by_user(self, user_id: int) -> list[NotebookResponse]:
-        rows = await self.session.scalars(select(Notebook).where(Notebook.user_id == user_id))
+        """All of the user's notebooks, unpaginated — for internal callers (sync
+        discovery, MCP summaries). The web list uses list_page_by_user instead."""
+        rows = await self.session.scalars(
+            select(Notebook)
+            .where(Notebook.user_id == user_id)
+            .order_by(func.lower(Notebook.display_name), Notebook.id)
+        )
         return [NotebookResponse.model_validate(row) for row in rows.all()]
+
+    async def list_page_by_user(
+        self, user_id: int, filters: NotebookFilter
+    ) -> PaginatedResponse[NotebookResponse]:
+        """One filtered, ordered page of the user's notebooks plus the total match count
+        (counted before limit/offset so the UI can show "X of N" / drive Load more)."""
+        conditions = _filter_conditions(user_id, filters)
+
+        total = await self.session.scalar(
+            select(func.count()).select_from(Notebook).where(*conditions)
+        )
+
+        rows = await self.session.scalars(
+            select(Notebook)
+            .where(*conditions)
+            .order_by(*_WEB_ORDER)
+            .limit(filters.limit)
+            .offset(filters.offset)
+        )
+        return PaginatedResponse(
+            data=[NotebookResponse.model_validate(row) for row in rows.all()],
+            total=total or 0,
+            limit=filters.limit,
+            offset=filters.offset,
+        )
 
     async def upsert_many(self, user_id: int, data: list[NotebookCreate]) -> list[NotebookResponse]:
         values = [{"user_id": user_id, **notebook.model_dump()} for notebook in data]
@@ -32,7 +88,9 @@ class NotebookRepository:
         await self.session.execute(upsert_statement)
         onenote_ids = [notebook.onenote_id for notebook in data]
         rows = await self.session.scalars(
-            select(Notebook).where(Notebook.user_id == user_id, Notebook.onenote_id.in_(onenote_ids))
+            select(Notebook)
+            .where(Notebook.user_id == user_id, Notebook.onenote_id.in_(onenote_ids))
+            .order_by(func.lower(Notebook.display_name), Notebook.id)
         )
         return [NotebookResponse.model_validate(row) for row in rows.all()]
 
