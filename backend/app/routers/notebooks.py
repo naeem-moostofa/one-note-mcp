@@ -25,14 +25,14 @@ async def list_notebooks(
     return await service.list_for_user(user_id, filters)
 
 
-@router.patch("/{notebook_id}", status_code=204)
+@router.patch("/{notebook_id}")
 async def toggle_notebook(
     notebook_id: int,
     body: NotebookSyncToggleRequest,
     user_id: Annotated[int, Depends(get_current_user_id)],
     service: Annotated[NotebookService, Depends(get_notebook_service)],
-) -> None:
-    await service.set_sync_enabled(user_id, notebook_id, body.sync_enabled)
+) -> NotebookWebResponse:
+    return await service.set_sync_enabled(user_id, notebook_id, body.sync_enabled)
 
 
 @router.post("/refresh", status_code=204)

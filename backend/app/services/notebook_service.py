@@ -9,6 +9,7 @@ from app.models import NotebookSyncStatus
 from app.repositories.notebook_repository import NotebookRepository
 from app.schemas import (
     NotebookFilter,
+    NotebookResponse,
     NotebookSummary,
     NotebookUpdate,
     NotebookWebResponse,
@@ -19,6 +20,17 @@ from app.schemas import (
 class NotebookService:
     def __init__(self, session: AsyncSession) -> None:
         self._notebook_repo = NotebookRepository(session)
+
+    @staticmethod
+    def _to_web_response(notebook: NotebookResponse) -> NotebookWebResponse:
+        return NotebookWebResponse(
+            id=notebook.id,
+            display_name=notebook.display_name,
+            sync_enabled=notebook.sync_enabled,
+            sync_status=notebook.sync_status,
+            last_synced_at=notebook.last_synced_at,
+            last_modified_datetime=notebook.last_modified_datetime,
+        )
 
     async def list_enabled_summaries(
         self,
@@ -42,35 +54,27 @@ class NotebookService:
         preserves total/limit/offset from the repository."""
         page = await self._notebook_repo.list_page_by_user(user_id, filters)
         return PaginatedResponse(
-            data=[
-                NotebookWebResponse(
-                    id=notebook.id,
-                    display_name=notebook.display_name,
-                    sync_enabled=notebook.sync_enabled,
-                    sync_status=notebook.sync_status,
-                    last_synced_at=notebook.last_synced_at,
-                    last_modified_datetime=notebook.last_modified_datetime,
-                )
-                for notebook in page.data
-            ],
+            data=[self._to_web_response(notebook) for notebook in page.data],
             total=page.total,
             limit=page.limit,
             offset=page.offset,
         )
 
-    async def set_sync_enabled(self, user_id: int, notebook_id: int, enabled: bool) -> None:
+    async def set_sync_enabled(self, user_id: int, notebook_id: int, enabled: bool) -> NotebookWebResponse:
         """Flip sync_enabled — 404 if the notebook doesn't exist, 403 if it isn't owned.
 
-        Returns nothing: this is a deterministic single-field flip with no
-        server-derived side effects, so the caller already knows the resulting
-        state (the router answers 204). If toggling ever gains side effects,
-        switch to a real refetch and return the authoritative resource."""
+        Returns the authoritative updated notebook so clients do not need to
+        optimistically rewrite filtered/paginated list pages."""
         notebook = await self._notebook_repo.get_by_id(notebook_id)
         if notebook is None:
             raise ResourceNotFoundError("Notebook not found")
         if notebook.user_id != user_id:
             raise ForbiddenError("Not your notebook")
         await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_enabled=enabled))
+        updated = await self._notebook_repo.get_by_id(notebook_id)
+        if updated is None:
+            raise ResourceNotFoundError("Notebook not found")
+        return self._to_web_response(updated)
 
     async def start_notebook_sync(self, user_id: int, notebook_id: int) -> bool:
         """Guarded entry point for a web-triggered background notebook sync.

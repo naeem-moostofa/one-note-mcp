@@ -129,10 +129,12 @@ async def _run(ids: dict[str, int]) -> None:
             response = await client.get("/api/notebooks", headers=authorization_header, params=bad_params)
             _assert(response.status_code == 422, f"GET with {bad_params} → 422 validation error (got {response.status_code})")
 
-        # --- PATCH /api/notebooks/{id} (204, no body — verify via the next GET) ---
+        # --- PATCH /api/notebooks/{id} (authoritative updated notebook) ---
         response = await client.patch(f"/api/notebooks/{ids['enabled_notebook']}", headers=authorization_header, json={"sync_enabled": False})
-        _assert(response.status_code == 204, f"PATCH own notebook → 204 (got {response.status_code})")
-        _assert(not response.content, "204 response carries no body")
+        _assert(response.status_code == 200, f"PATCH own notebook → 200 (got {response.status_code})")
+        updated = response.json()
+        _assert(updated["id"] == ids["enabled_notebook"], "PATCH response returns the updated notebook")
+        _assert(updated["sync_enabled"] is False, "PATCH response carries the authoritative sync_enabled value")
         response = await client.get("/api/notebooks", headers=authorization_header)
         flipped = next(notebook for notebook in response.json()["data"] if notebook["id"] == ids["enabled_notebook"])
         _assert(flipped["sync_enabled"] is False, "the flip persists on the next GET")

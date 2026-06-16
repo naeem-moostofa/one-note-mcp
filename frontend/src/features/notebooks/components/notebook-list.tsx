@@ -212,6 +212,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
               notebook={notebook}
               onToggle={(id, syncEnabled) => toggleSync.mutate({ id, syncEnabled })}
               onSync={(id) => syncNotebook.mutate(id)}
+              disabled={toggleSync.pendingNotebookIds.has(notebook.id)}
             />
           ))}
           <PaginationControls
