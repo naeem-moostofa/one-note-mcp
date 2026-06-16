@@ -27,3 +27,20 @@ export interface NotebookWebResponse {
   last_synced_at: string | null // ISO 8601 datetime; null until first content sync
   last_modified_datetime: string | null // ISO 8601; when the notebook was last edited in OneNote (null until first refresh)
 }
+
+// Generic paginated envelope (backend PaginatedResponse[T] in schemas.py).
+export interface PaginatedResponse<T> {
+  data: T[]
+  total: number
+  limit: number
+  offset: number
+}
+
+// GET /api/notebooks query params -> NotebookFilter
+export interface NotebookFilter {
+  search?: string
+  sync_enabled?: boolean
+  sync_status?: NotebookSyncStatus
+  limit?: number
+  offset?: number
+}

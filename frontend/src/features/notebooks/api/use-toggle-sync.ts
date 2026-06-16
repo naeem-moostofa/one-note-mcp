@@ -2,7 +2,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { notebooksQueryKey } from '@/features/notebooks/api/use-notebooks'
 import { apiClient } from '@/lib/api-client'
-import type { NotebookWebResponse } from '@/types/api'
+import type { NotebookWebResponse, PaginatedResponse } from '@/types/api'
+
+type NotebookPage = PaginatedResponse<NotebookWebResponse>
 
 interface ToggleArgs {
   id: number
@@ -19,17 +21,23 @@ export function useToggleSync() {
     },
     onMutate: async ({ id, syncEnabled }: ToggleArgs) => {
       await queryClient.cancelQueries({ queryKey: notebooksQueryKey })
-      const previous = queryClient.getQueryData<NotebookWebResponse[]>(notebooksQueryKey)
-      queryClient.setQueryData<NotebookWebResponse[]>(notebooksQueryKey, (current) =>
-        current?.map((notebook) =>
-          notebook.id === id ? { ...notebook, sync_enabled: syncEnabled } : notebook,
-        ),
+      const previous = queryClient.getQueriesData<NotebookPage>({ queryKey: notebooksQueryKey })
+      // Update only page.data — total/limit/offset are unchanged by a field flip.
+      queryClient.setQueriesData<NotebookPage>({ queryKey: notebooksQueryKey }, (current) =>
+        current && {
+          ...current,
+          data: current.data.map((notebook) =>
+            notebook.id === id ? { ...notebook, sync_enabled: syncEnabled } : notebook,
+          ),
+        },
       )
       return { previous }
     },
     onError: (_error, _args, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(notebooksQueryKey, context.previous)
+        for (const [queryKey, page] of context.previous) {
+          queryClient.setQueryData(queryKey, page)
+        }
       }
     },
     onSettled: () => {

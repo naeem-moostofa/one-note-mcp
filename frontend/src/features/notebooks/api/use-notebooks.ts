@@ -1,21 +1,24 @@
 import { useQuery } from '@tanstack/react-query'
 
 import { apiClient } from '@/lib/api-client'
-import type { NotebookWebResponse } from '@/types/api'
+import type { NotebookFilter, NotebookWebResponse, PaginatedResponse } from '@/types/api'
 
 export const notebooksQueryKey = ['notebooks'] as const
+export const notebooksQueryKeyFor = (filters: NotebookFilter) => [...notebooksQueryKey, filters] as const
 
-// All of the user's notebooks (enabled and disabled) with sync state.
-export function useNotebooks() {
+// One filtered, paginated page of the user's notebooks (enabled and disabled) with
+// sync state. The backend orders by "last edited" (newest first), so the page arrives
+// ready to render — no client-side sort needed.
+export function useNotebooks(filters: NotebookFilter = {}) {
   return useQuery({
-    queryKey: notebooksQueryKey,
-    queryFn: async (): Promise<NotebookWebResponse[]> => {
-      const { data } = await apiClient.get<NotebookWebResponse[]>('/api/notebooks')
+    queryKey: notebooksQueryKeyFor(filters),
+    queryFn: async (): Promise<PaginatedResponse<NotebookWebResponse>> => {
+      const { data } = await apiClient.get<PaginatedResponse<NotebookWebResponse>>('/api/notebooks', { params: filters })
       return data
     },
-    // While any notebook is mid-sync, poll so its badge updates live; stop once
-    // none are SYNCING.
+    // While any notebook on the current page is mid-sync, poll so its badge updates
+    // live; stop once none are SYNCING.
     refetchInterval: (query) =>
-      query.state.data?.some((notebook) => notebook.sync_status === 'SYNCING') ? 3000 : false,
+      query.state.data?.data.some((notebook) => notebook.sync_status === 'SYNCING') ? 3000 : false,
   })
 }
