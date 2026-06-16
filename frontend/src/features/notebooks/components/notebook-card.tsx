@@ -12,9 +12,16 @@ interface NotebookCardProps {
 export function NotebookCard({ notebook, onToggle, onSync, disabled }: NotebookCardProps) {
   const status = describeSyncStatus(notebook)
   const isSyncing = notebook.sync_status === 'SYNCING'
+  const accentClass = !notebook.sync_enabled
+    ? 'border-l-muted'
+    : notebook.sync_status === 'FAILED'
+      ? 'border-l-warn'
+      : isSyncing
+        ? 'border-l-busy'
+        : 'border-l-ok'
 
   return (
-    <div className="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 transition-shadow hover:shadow-sm">
+    <div className={`flex items-center justify-between gap-4 rounded-xl border border-l-4 border-line bg-surface px-5 py-4 transition-shadow hover:border-brand-soft hover:shadow-sm ${accentClass}`}>
       <div className="min-w-0">
         <p className="truncate font-medium text-ink">{notebook.display_name}</p>
         <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${status.badgeClass}`}>
