@@ -26,8 +26,8 @@ apiClient.interceptors.response.use(
   (error) => {
     if (error?.response?.status === 401) {
       clearStoredToken()
-      if (window.location.pathname !== '/login') {
-        window.location.assign('/login')
+      if (window.location.pathname !== '/') {
+        window.location.assign('/')
       }
     }
     return Promise.reject(error)

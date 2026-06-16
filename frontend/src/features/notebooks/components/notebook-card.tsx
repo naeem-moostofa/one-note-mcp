@@ -1,0 +1,43 @@
+import { Toggle } from '@/components/ui/toggle'
+import { describeSyncStatus } from '@/features/notebooks/lib/sync-status'
+import type { NotebookWebResponse } from '@/types/api'
+
+interface NotebookCardProps {
+  notebook: NotebookWebResponse
+  onToggle: (id: number, syncEnabled: boolean) => void
+  onSync: (id: number) => void
+  disabled?: boolean
+}
+
+export function NotebookCard({ notebook, onToggle, onSync, disabled }: NotebookCardProps) {
+  const status = describeSyncStatus(notebook)
+  const isSyncing = notebook.sync_status === 'SYNCING'
+
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 transition-shadow hover:shadow-sm">
+      <div className="min-w-0">
+        <p className="truncate font-medium text-ink">{notebook.display_name}</p>
+        <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${status.badgeClass}`}>
+          {status.label}
+        </span>
+      </div>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => onSync(notebook.id)}
+          disabled={isSyncing}
+          title="Sync this notebook's pages from OneNote now"
+          className="rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-ink transition-colors hover:bg-brand-soft disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isSyncing ? 'Syncing…' : 'Sync'}
+        </button>
+        <Toggle
+          checked={notebook.sync_enabled}
+          onChange={(next) => onToggle(notebook.id, next)}
+          disabled={disabled}
+          label={`Toggle auto-sync for ${notebook.display_name}`}
+        />
+      </div>
+    </div>
+  )
+}

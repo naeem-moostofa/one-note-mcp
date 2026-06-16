@@ -1,15 +1,52 @@
-:root {
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
-  color-scheme: light dark;
+@import 'tailwindcss';
+
+/*
+  Light design palette, exposed as theme tokens so the whole app pulls from one
+  source. Tailwind v4 turns each `--color-*` into utilities (bg-canvas, text-ink,
+  border-line, bg-brand, …) — components use these semantic names instead of
+  ad-hoc hex values, which keeps the palette consistent and easy to retune here.
+*/
+@theme {
+  --color-canvas: #f6f7fb; /* page background — soft off-white */
+  --color-surface: #ffffff; /* cards / bars */
+  --color-ink: #1f2333; /* primary text */
+  --color-muted: #6b7280; /* secondary text */
+  --color-line: #e8e9f1; /* hairline borders */
+
+  --color-brand: #6366f1; /* indigo accent */
+  --color-brand-hover: #4f46e5;
+  --color-brand-soft: #eef0ff; /* tinted brand background */
+
+  --color-ok: #16a34a; /* synced */
+  --color-ok-soft: #e9f7ee;
+  --color-busy: #2563eb; /* syncing */
+  --color-busy-soft: #e8efff;
+  --color-warn: #d97706; /* failed / needs attention */
+  --color-warn-soft: #fdf2e3;
 }
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
   margin: 0;
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+  Tailwind v4's Preflight resets buttons to the default arrow cursor. Restore the
+  pointer (hand) cursor on enabled interactive elements so they feel clickable.
+*/
+@layer base {
+  button:not(:disabled),
+  [role='button']:not(:disabled),
+  [role='switch']:not(:disabled) {
+    cursor: pointer;
+  }
 }

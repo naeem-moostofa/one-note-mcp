@@ -1,19 +1,19 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 
-import { HomePage } from '@/app/routes/home'
-import { LoginPage } from '@/app/routes/login'
+import { DashboardPage } from '@/app/routes/dashboard'
+import { LandingPage } from '@/app/routes/landing'
 import { ProtectedRoute } from '@/features/auth/components/protected-route'
 
 export function AppRouter() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/login" element={<LoginPage />} />
+        <Route path="/" element={<LandingPage />} />
         <Route element={<ProtectedRoute />}>
-          <Route path="/" element={<HomePage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
         </Route>
-        {/* Unknown paths fall back to the protected root (which itself redirects
-            to /login when unauthenticated). */}
+        {/* Unknown paths fall back to the landing page (which forwards signed-in
+            users on to /dashboard). */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
