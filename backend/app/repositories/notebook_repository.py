@@ -23,6 +23,10 @@ class NotebookRepository:
         insert_statement = pg_insert(Notebook).values(values)
         upsert_statement = insert_statement.on_conflict_do_update(
             index_elements=["user_id", "onenote_id"],
+            # last_modified_datetime is deliberately NOT updated here — Refresh only
+            # touches names. It's computed from the newest page during content Sync
+            # (see SyncService._sync_notebook); clobbering it on Refresh would wipe
+            # that accurate value back to NULL.
             set_={"display_name": insert_statement.excluded.display_name},
         )
         await self.session.execute(upsert_statement)

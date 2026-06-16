@@ -32,3 +32,18 @@ function labelWithDate(prefix: string, isoDate: string | null): string {
   }
   return `${prefix} · ${new Date(isoDate).toLocaleDateString()}`
 }
+
+// Compact "Jun 15, 2026, 3:04 PM" for the per-notebook timestamps. Returns a
+// dash when the value is null (never refreshed / never content-synced).
+export function formatTimestamp(isoDate: string | null): string {
+  if (!isoDate) {
+    return '—'
+  }
+  return new Date(isoDate).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}

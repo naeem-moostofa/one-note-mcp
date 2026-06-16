@@ -24,5 +24,6 @@ export interface NotebookWebResponse {
   display_name: string
   sync_enabled: boolean
   sync_status: NotebookSyncStatus
-  last_synced_at: string | null // ISO 8601 datetime; null until first sync
+  last_synced_at: string | null // ISO 8601 datetime; null until first content sync
+  last_modified_datetime: string | null // ISO 8601; when the notebook was last edited in OneNote (null until first refresh)
 }

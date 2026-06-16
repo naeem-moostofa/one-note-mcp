@@ -38,6 +38,7 @@ class NotebookService:
                 sync_enabled=notebook.sync_enabled,
                 sync_status=notebook.sync_status,
                 last_synced_at=notebook.last_synced_at,
+                last_modified_datetime=notebook.last_modified_datetime,
             )
             for notebook in notebooks
         ]

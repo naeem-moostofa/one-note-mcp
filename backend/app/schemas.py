@@ -44,6 +44,7 @@ class NotebookResponse(BaseModel):
     sync_enabled: bool
     sync_status: NotebookSyncStatus
     last_synced_at: Optional[datetime] = None
+    last_modified_datetime: Optional[datetime] = None
 
 
 class SectionResponse(BaseModel):
@@ -132,6 +133,7 @@ class NotebookWebResponse(BaseModel):
     sync_enabled: bool
     sync_status: NotebookSyncStatus
     last_synced_at: Optional[datetime] = None
+    last_modified_datetime: Optional[datetime] = None
 
 
 class MCPConnectionWebResponse(BaseModel):
@@ -205,6 +207,7 @@ class NotebookUpdate(BaseModel):
     sync_enabled: Optional[bool] = None
     sync_status: Optional[NotebookSyncStatus] = None
     last_synced_at: Optional[datetime] = None
+    last_modified_datetime: Optional[datetime] = None
 
 
 class PageUpdate(BaseModel):

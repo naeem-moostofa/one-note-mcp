@@ -75,6 +75,7 @@ class Notebook(Base):
         server_default=NotebookSyncStatus.PENDING.value,
     )
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    last_modified_datetime = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (UniqueConstraint("user_id", "onenote_id"),)
 

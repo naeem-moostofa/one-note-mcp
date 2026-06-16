@@ -1,5 +1,5 @@
 import { Toggle } from '@/components/ui/toggle'
-import { describeSyncStatus } from '@/features/notebooks/lib/sync-status'
+import { describeSyncStatus, formatTimestamp } from '@/features/notebooks/lib/sync-status'
 import type { NotebookWebResponse } from '@/types/api'
 
 interface NotebookCardProps {
@@ -20,6 +20,16 @@ export function NotebookCard({ notebook, onToggle, onSync, disabled }: NotebookC
         <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${status.badgeClass}`}>
           {status.label}
         </span>
+        <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted">
+          <div className="flex gap-1">
+            <dt>Last edited:</dt>
+            <dd className="text-ink">{formatTimestamp(notebook.last_modified_datetime)}</dd>
+          </div>
+          <div className="flex gap-1">
+            <dt>Last synced:</dt>
+            <dd className="text-ink">{formatTimestamp(notebook.last_synced_at)}</dd>
+          </div>
+        </dl>
       </div>
       <div className="flex items-center gap-3">
         <button

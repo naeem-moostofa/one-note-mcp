@@ -37,6 +37,23 @@ def _compute_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+def _finalize_fresh_update(
+    sync_started_at: datetime, latest_page_modified: datetime | None
+) -> NotebookUpdate:
+    """Build the NotebookUpdate that finalises a notebook FRESH after a content sync.
+
+    Writes last_modified_datetime (the newest page edit time) only when the sync
+    actually saw pages — a pageless notebook leaves the existing value untouched
+    rather than clobbering it to NULL (the field is excluded when unset)."""
+    if latest_page_modified is None:
+        return NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at)
+    return NotebookUpdate(
+        sync_status=NotebookSyncStatus.FRESH,
+        last_synced_at=sync_started_at,
+        last_modified_datetime=latest_page_modified,
+    )
+
+
 class SyncService:
     def __init__(
         self,
@@ -105,10 +122,10 @@ class SyncService:
             access_token = await self._acquire_token(connection)
             if access_token is None:
                 raise RuntimeError("Re-auth required — reconnect your Microsoft account")
-            await self._sync_notebook(notebook, access_token)
+            latest_page_modified = await self._sync_notebook(notebook, access_token)
             await self._notebook_repo.update(
                 notebook_id,
-                NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at),
+                _finalize_fresh_update(sync_started_at, latest_page_modified),
             )
             logger.info("Notebook '%s' synced successfully", notebook.display_name)
         except Exception:
@@ -195,10 +212,10 @@ class SyncService:
         for notebook in enabled_notebooks:
             sync_started_at = datetime.now(timezone.utc)
             try:
-                await self._sync_notebook(notebook, access_token)
+                latest_page_modified = await self._sync_notebook(notebook, access_token)
                 await self._notebook_repo.update(
                     notebook.id,
-                    NotebookUpdate(sync_status=NotebookSyncStatus.FRESH, last_synced_at=sync_started_at),
+                    _finalize_fresh_update(sync_started_at, latest_page_modified),
                 )
                 logger.info("Notebook '%s' synced successfully", notebook.display_name)
             except Exception:
@@ -208,7 +225,10 @@ class SyncService:
                     NotebookUpdate(sync_status=NotebookSyncStatus.FAILED),
                 )
 
-    async def _sync_notebook(self, notebook: NotebookResponse, access_token: str) -> None:
+    async def _sync_notebook(self, notebook: NotebookResponse, access_token: str) -> datetime | None:
+        """Sync a notebook's sections + pages. Returns the newest page lastModifiedDateTime
+        across the whole notebook (None if it has no pages) — the accurate "last edited"
+        signal, which the caller writes onto the notebook when finalising it FRESH."""
         logger.info("Syncing notebook '%s' (last synced: %s)", notebook.display_name, notebook.last_synced_at or "never")
 
         graph_sections = await self._graph_client.get_sections(access_token, notebook.onenote_id)
@@ -229,10 +249,20 @@ class SyncService:
             logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
             await self._section_repo.delete_many(sections_to_delete)
 
+        latest_page_modified: datetime | None = None
         for section in db_sections:
-            await self._sync_section(section, access_token, notebook.last_synced_at)
+            section_latest = await self._sync_section(section, access_token, notebook.last_synced_at)
+            if section_latest is not None and (latest_page_modified is None or section_latest > latest_page_modified):
+                latest_page_modified = section_latest
 
-    async def _sync_section(self, section: SectionResponse, access_token: str, notebook_last_synced_at: datetime | None) -> None:
+        return latest_page_modified
+
+    async def _sync_section(
+        self, section: SectionResponse, access_token: str, notebook_last_synced_at: datetime | None
+    ) -> datetime | None:
+        """Sync one section's pages. Returns the newest page lastModifiedDateTime in the
+        section (across all pages, not just the ones re-synced), or None if it has no
+        pages — the caller rolls these up into the notebook's "last edited" timestamp."""
         existing_db_pages = await self._page_repo.list_by_section(section.id)
         graph_pages = await self._graph_client.get_pages(access_token, section.onenote_id)
 
@@ -241,8 +271,9 @@ class SyncService:
             pages_to_delete = [page.id for page in existing_db_pages]
             if pages_to_delete:
                 await self._page_repo.delete_many(pages_to_delete)
-            return
+            return None
 
+        latest_page_modified = max(graph_page.last_modified_datetime for graph_page in graph_pages)
         graph_pages_map = {page.id: page for page in graph_pages}
 
         db_pages = await self._page_repo.upsert_many(
@@ -287,6 +318,8 @@ class SyncService:
 
         for graph_page, db_page in to_sync:
             await self._sync_page_content(db_page, access_token)
+
+        return latest_page_modified
 
     async def _sync_page_content(self, page: PageResponse, access_token: str) -> None:
         logger.info("      Syncing page '%s'", page.title or page.onenote_id)
