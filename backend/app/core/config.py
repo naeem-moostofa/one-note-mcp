@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str
     GOOGLE_CLOUD_VISION_API_KEY: str
     MCP_SERVER_URL: str
+    SYNC_PAGE_WORKER_CONCURRENCY: int = 10
+    SYNC_GRAPH_CONCURRENCY: int = 5
+    SYNC_VISION_CONCURRENCY: int = 10
 
     @computed_field
     @property

@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -17,8 +16,8 @@ async def lifespan(app: FastAPI):
     # FastMCP's streamable-http transport requires its lifespan to run so the
     # session manager is initialised — Starlette's mount() doesn't propagate
     # nested lifespans, so we drive it from ours.
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
-        app.state.graph_client = GraphClient(http_client)
+    async with GraphClient() as graph_client:
+        app.state.graph_client = graph_client
         async with mcp_app.lifespan(app):
             yield
 

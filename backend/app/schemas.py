@@ -402,3 +402,31 @@ class GraphPageContent(BaseModel):
     elements: list[GraphPageElement]  # ordered by CSS top/left — visual reading order
     ink_strokes: list[list[tuple[float, float]]]  # HiMetric coords; empty list if no ink
     has_handwriting: bool
+
+
+# --- Sync service schemas ---
+
+
+class SectionPages(BaseModel):
+    section: SectionResponse
+    graph_pages: list[GraphPage]
+
+
+class PageContentSyncCandidate(BaseModel):
+    section_name: str
+    page: PageResponse
+
+
+class SectionSyncPlan(BaseModel):
+    latest_page_modified: datetime | None = None
+    pages_to_sync: list[PageContentSyncCandidate] = Field(default_factory=list)
+
+
+class PageContentSyncResult(BaseModel):
+    page_id: int
+    title: str | None = None
+    onenote_id: str
+    content: str | None = None
+    content_hash: str | None = None
+    sync_status: PageSyncStatus = PageSyncStatus.FRESH
+    error_message: str | None = None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ForbiddenError, ResourceNotFoundError
+from app.core.exceptions import ConflictError, ForbiddenError, ResourceNotFoundError
 from app.models import NotebookSyncStatus
 from app.repositories.notebook_repository import NotebookRepository
 from app.schemas import (
@@ -81,13 +81,18 @@ class NotebookService:
 
         404 if it doesn't exist, 403 if it isn't owned. If a sync is already in
         flight, returns False (don't start a duplicate run). Otherwise marks the
-        notebook SYNCING and returns True so the caller launches the background sync."""
+        notebook SYNCING, commits that state so the background task's separate DB
+        session does not block behind the request transaction, and returns True
+        so the caller launches the background sync."""
         notebook = await self._notebook_repo.get_by_id(notebook_id)
         if notebook is None:
             raise ResourceNotFoundError("Notebook not found")
         if notebook.user_id != user_id:
             raise ForbiddenError("Not your notebook")
+        if not notebook.sync_enabled:
+            raise ConflictError("Enable sync before syncing this notebook")
         if notebook.sync_status == NotebookSyncStatus.SYNCING:
             return False
         await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING))
+        await self._notebook_repo.session.commit()
         return True

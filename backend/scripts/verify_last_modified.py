@@ -27,8 +27,6 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-import httpx
-
 from app.clients.graph_client import GraphClient
 from app.clients.msal_client import get_msal_client
 from app.clients.ocr_client import get_ocr_client
@@ -88,11 +86,11 @@ async def _pick_notebook(service: SyncService, access_token: str, small_threshol
 
 
 async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: bool) -> None:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
+    async with GraphClient() as graph_client:
         async with AsyncSessionLocal() as session:
             service = SyncService(
                 session=session,
-                graph_client=GraphClient(http_client),
+                graph_client=graph_client,
                 msal_client=get_msal_client(),
                 ocr_client=get_ocr_client() if use_ocr else None,
             )

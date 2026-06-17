@@ -22,7 +22,6 @@ import logging
 import re
 from pathlib import Path
 
-import httpx
 from PIL import Image
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -131,9 +130,7 @@ async def main(
     target_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Output dir: %s", target_dir.resolve())
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
-        graph_client = GraphClient(http_client)
-
+    async with GraphClient() as graph_client:
         logger.info("Fetching page HTML + InkML from Graph...")
         page_content = await graph_client.get_page_content_with_ink(access_token, resolved.page_onenote_id)
 

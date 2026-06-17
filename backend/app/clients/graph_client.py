@@ -1,3 +1,4 @@
+import asyncio
 import email
 import io
 import logging
@@ -9,8 +10,9 @@ import httpx
 from bs4 import BeautifulSoup
 from fastapi import Request
 from PIL import Image, ImageDraw
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
+from app.core.config import settings
 from app.core.exceptions import GraphAPIError
 from app.schemas import GraphNotebook, GraphPage, GraphPageContent, GraphPageElement, GraphSection
 
@@ -40,6 +42,13 @@ logger = logging.getLogger(__name__)
 
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
+# OneNote/Graph allows 5 concurrent requests per app per user. With a single Microsoft
+# account this is process-wide, so a module-level semaphore (shared by every GraphClient
+# instance) is the right scope. It binds to the event loop on first acquire, not at import,
+# so it is safe as long as each process runs one loop. When multiple Microsoft accounts are
+# supported, switch to a per-connection keyed semaphore.
+_graph_semaphore = asyncio.Semaphore(settings.SYNC_GRAPH_CONCURRENCY)
+
 
 def _is_retryable(error: BaseException) -> bool:
     return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in _RETRYABLE_STATUS_CODES
@@ -47,6 +56,25 @@ def _is_retryable(error: BaseException) -> bool:
 
 def _raise_graph_api_error(retry_state) -> None:
     raise GraphAPIError(f"Graph API unavailable — failed after {_MAX_RETRIES} attempts")
+
+
+# Throttle/retry is the one Graph signal not already covered by httpx's own request logger
+# (which logs method + URL + status per call), so it's the only bespoke log we keep. The
+# request URL is logged directly — no need to re-derive an endpoint label from it.
+def _log_graph_retry(retry_state: RetryCallState) -> None:
+    error = retry_state.outcome.exception() if retry_state.outcome else None
+    if not isinstance(error, httpx.HTTPStatusError):
+        return
+
+    retry_after = error.response.headers.get("retry-after")
+    logger.warning(
+        "graph_retry url=%s status=%d attempt=%d next_sleep_s=%.1f retry_after=%s",
+        error.request.url,
+        error.response.status_code,
+        retry_state.attempt_number,
+        retry_state.next_action.sleep if retry_state.next_action else 0,
+        retry_after or "-",
+    )
 
 
 def _parse_css_px(style: str, prop: str) -> float:
@@ -174,7 +202,7 @@ def composite_page(
             image_width = int(element.width * render_scale)
             image_height = int(element.height * render_scale)
             if image_width > 0 and image_height > 0:
-                image = image.resize((image_width, image_height), Image.LANCZOS)
+                image = image.resize((image_width, image_height), Image.Resampling.LANCZOS)
             canvas.paste(image, (int(element.left * render_scale), int(element.top * render_scale)))
         except Exception:
             logger.warning("composite_page: failed to draw image at (%.0f, %.0f)", element.left, element.top)
@@ -204,8 +232,24 @@ def composite_page(
 
 
 class GraphClient:
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
-        self._client = http_client
+    def __init__(self, *, timeout: float = 30.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        # GraphClient owns its transport. Pool sized above the Graph semaphore so the
+        # semaphore is the binding concurrency cap, not httpx's pool. Tests inject a
+        # transport (e.g. httpx.MockTransport) to avoid real network calls.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(
+                max_connections=settings.SYNC_GRAPH_CONCURRENCY * 2,
+                max_keepalive_connections=settings.SYNC_GRAPH_CONCURRENCY,
+            ),
+            transport=transport,
+        )
+
+    async def __aenter__(self) -> "GraphClient":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self._client.aclose()
 
     def _headers(self, access_token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {access_token}"}
@@ -214,12 +258,16 @@ class GraphClient:
         retry=retry_if_exception(_is_retryable),
         wait=wait_random_exponential(multiplier=1, max=60),
         stop=stop_after_attempt(_MAX_RETRIES),
+        before_sleep=_log_graph_retry,
         retry_error_callback=_raise_graph_api_error,
     )
     async def _get(self, url: str, access_token: str) -> httpx.Response:
-        response = await self._client.get(url, headers=self._headers(access_token))
-        response.raise_for_status()
-        return response
+        # Acquire inside the retried body so backoff sleeps between attempts (up to 60s)
+        # release the slot rather than holding one of the 5 the whole time.
+        async with _graph_semaphore:
+            response = await self._client.get(url, headers=self._headers(access_token))
+            response.raise_for_status()
+            return response
 
     async def _get_all(self, url: str, access_token: str, model: type[_M]) -> list[_M]:
         items: list[_M] = []

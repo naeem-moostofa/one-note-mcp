@@ -2,8 +2,6 @@ import argparse
 import asyncio
 import logging
 
-import httpx
-
 from app.clients.graph_client import GraphClient
 from app.clients.msal_client import get_msal_client
 from app.clients.ocr_client import get_ocr_client
@@ -16,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 async def main(notebooks_only: bool, notebook_id: int | None, force: bool = False) -> None:
     logger.info("Sync started")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
-        graph_client = GraphClient(http_client)
+    async with GraphClient() as graph_client:
         async with AsyncSessionLocal() as session:
             try:
                 service = SyncService(

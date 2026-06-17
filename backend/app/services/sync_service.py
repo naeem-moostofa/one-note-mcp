@@ -3,12 +3,12 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 
-import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.graph_client import GraphClient, composite_page
 from app.clients.msal_client import MSALClient, get_msal_client
 from app.clients.ocr_client import OCRClient, get_ocr_client
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.encryption import decrypt, encrypt
 from app.core.exceptions import ConflictError, MSALAuthError
@@ -24,10 +24,16 @@ from app.schemas import (
     NotebookResponse,
     NotebookUpdate,
     PageCreate,
+    PageContentSyncCandidate,
+    PageContentSyncResult,
     PageResponse,
     PageUpdate,
+    GraphPage,
+    GraphPageElement,
     SectionCreate,
+    SectionPages,
     SectionResponse,
+    SectionSyncPlan,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,11 +68,16 @@ class SyncService:
         msal_client: MSALClient,
         ocr_client: OCRClient | None = None,
         force: bool = False,
+        page_worker_concurrency: int = settings.SYNC_PAGE_WORKER_CONCURRENCY,
     ) -> None:
+        self._session = session
         self._graph_client = graph_client
         self._msal_client = msal_client
         self._ocr_client = ocr_client
         self._force = force
+        # Graph and Vision concurrency are capped inside their clients; this only bounds how
+        # many pages are in flight through the pipeline (memory + Pillow CPU).
+        self._page_worker_concurrency = max(1, page_worker_concurrency)
         self._connection_repo = MicrosoftConnectionRepository(session)
         self._notebook_repo = NotebookRepository(session)
         self._section_repo = SectionRepository(session)
@@ -115,6 +126,7 @@ class SyncService:
             return
         sync_started_at = datetime.now(timezone.utc)
         await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING))
+        await self._session.commit()
         try:
             connection = await self._connection_repo.get_by_user_id(notebook.user_id)
             if connection is None:
@@ -127,10 +139,12 @@ class SyncService:
                 notebook_id,
                 _finalize_fresh_update(sync_started_at, latest_page_modified),
             )
+            await self._session.commit()
             logger.info("Notebook '%s' synced successfully", notebook.display_name)
         except Exception:
             logger.exception("Failed to sync notebook '%s'", notebook.display_name)
             await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.FAILED))
+            await self._session.commit()
 
     async def _acquire_token(self, connection: MicrosoftConnectionResponse) -> str | None:
         """Acquire a fresh access token and save the updated cache. Returns None if re-auth needed."""
@@ -208,6 +222,7 @@ class SyncService:
             [notebook.id for notebook in enabled_notebooks],
             NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING),
         )
+        await self._session.commit()
 
         for notebook in enabled_notebooks:
             sync_started_at = datetime.now(timezone.utc)
@@ -217,6 +232,7 @@ class SyncService:
                     notebook.id,
                     _finalize_fresh_update(sync_started_at, latest_page_modified),
                 )
+                await self._session.commit()
                 logger.info("Notebook '%s' synced successfully", notebook.display_name)
             except Exception:
                 logger.exception("Failed to sync notebook '%s'", notebook.display_name)
@@ -224,6 +240,7 @@ class SyncService:
                     notebook.id,
                     NotebookUpdate(sync_status=NotebookSyncStatus.FAILED),
                 )
+                await self._session.commit()
 
     async def _sync_notebook(self, notebook: NotebookResponse, access_token: str) -> datetime | None:
         """Sync a notebook's sections + pages. Returns the newest page lastModifiedDateTime
@@ -249,29 +266,60 @@ class SyncService:
             logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
             await self._section_repo.delete_many(sections_to_delete)
 
+        section_pages = await self._fetch_pages_for_sections(db_sections, access_token)
+
         latest_page_modified: datetime | None = None
-        for section in db_sections:
-            section_latest = await self._sync_section(section, access_token, notebook.last_synced_at)
-            if section_latest is not None and (latest_page_modified is None or section_latest > latest_page_modified):
-                latest_page_modified = section_latest
+        pages_to_sync: list[PageContentSyncCandidate] = []
+        for section_page_list in section_pages:
+            section_plan = await self._sync_section_metadata(
+                section_page_list.section,
+                section_page_list.graph_pages,
+                notebook.last_synced_at,
+            )
+            if (
+                section_plan.latest_page_modified is not None
+                and (
+                    latest_page_modified is None
+                    or section_plan.latest_page_modified > latest_page_modified
+                )
+            ):
+                latest_page_modified = section_plan.latest_page_modified
+            pages_to_sync.extend(section_plan.pages_to_sync)
+
+        await self._sync_page_contents(pages_to_sync, access_token)
 
         return latest_page_modified
 
-    async def _sync_section(
-        self, section: SectionResponse, access_token: str, notebook_last_synced_at: datetime | None
-    ) -> datetime | None:
-        """Sync one section's pages. Returns the newest page lastModifiedDateTime in the
-        section (across all pages, not just the ones re-synced), or None if it has no
-        pages — the caller rolls these up into the notebook's "last edited" timestamp."""
+    async def _fetch_pages_for_sections(
+        self, sections: list[SectionResponse], access_token: str
+    ) -> list[SectionPages]:
+        async def fetch_one(section: SectionResponse) -> SectionPages:
+            graph_pages = await self._graph_client.get_pages(access_token, section.onenote_id)
+            return SectionPages(section=section, graph_pages=graph_pages)
+
+        if not sections:
+            return []
+        # Concurrency here is bounded by the Graph semaphore inside GraphClient (5 concurrent
+        # requests), so we gather all sections rather than adding a second semaphore.
+        logger.info("  Fetching page lists for %d section(s)", len(sections))
+        return await asyncio.gather(*(fetch_one(section) for section in sections))
+
+    async def _sync_section_metadata(
+        self,
+        section: SectionResponse,
+        graph_pages: list[GraphPage],
+        notebook_last_synced_at: datetime | None,
+    ) -> SectionSyncPlan:
+        """Upsert/delete page metadata and return pages that need content sync."""
         existing_db_pages = await self._page_repo.list_by_section(section.id)
-        graph_pages = await self._graph_client.get_pages(access_token, section.onenote_id)
 
         if not graph_pages:
             logger.info("    Section '%s': no pages in Graph", section.display_name)
             pages_to_delete = [page.id for page in existing_db_pages]
             if pages_to_delete:
                 await self._page_repo.delete_many(pages_to_delete)
-            return None
+            await self._session.commit()
+            return SectionSyncPlan()
 
         latest_page_modified = max(graph_page.last_modified_datetime for graph_page in graph_pages)
         graph_pages_map = {page.id: page for page in graph_pages}
@@ -286,13 +334,14 @@ class SyncService:
         if pages_to_delete:
             logger.info("    Section '%s': deleting %d pages removed from Graph", section.display_name, len(pages_to_delete))
             await self._page_repo.delete_many(pages_to_delete)
+        await self._session.commit()
 
         if self._force:
             logger.info("    Force mode — syncing all pages regardless of modification time")
         else:
             logger.info("    Last notebook sync: %s", notebook_last_synced_at or "never")
 
-        to_sync = []
+        to_sync: list[PageContentSyncCandidate] = []
         skipped = []
         for graph_page in graph_pages:
             db_page = db_pages_map.get(graph_page.id)
@@ -302,7 +351,7 @@ class SyncService:
                 or graph_page.last_modified_datetime > notebook_last_synced_at
                 or db_page.sync_status == PageSyncStatus.FAILED
             ):
-                to_sync.append((graph_page, db_page))
+                to_sync.append(PageContentSyncCandidate(section_name=section.display_name, page=db_page))
             else:
                 logger.info(
                     "    Skipping '%s' — last modified %s, last sync %s",
@@ -316,12 +365,42 @@ class SyncService:
         if skipped:
             logger.info("      Skipped (not modified since last sync): %s", skipped)
 
-        for graph_page, db_page in to_sync:
-            await self._sync_page_content(db_page, access_token)
+        return SectionSyncPlan(latest_page_modified=latest_page_modified, pages_to_sync=to_sync)
 
-        return latest_page_modified
+    async def _sync_page_contents(
+        self, candidates: list[PageContentSyncCandidate], access_token: str
+    ) -> None:
+        if not candidates:
+            return
 
-    async def _sync_page_content(self, page: PageResponse, access_token: str) -> None:
+        semaphore = asyncio.Semaphore(self._page_worker_concurrency)
+
+        async def build_one(candidate: PageContentSyncCandidate) -> PageContentSyncResult:
+            async with semaphore:
+                return await self._build_page_content_result(candidate.page, access_token)
+
+        logger.info(
+            "  Syncing content for %d page(s) with page-worker concurrency=%d",
+            len(candidates),
+            self._page_worker_concurrency,
+        )
+        tasks = [asyncio.create_task(build_one(candidate)) for candidate in candidates]
+        completed = 0
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            completed += 1
+            await self._apply_page_content_result(result)
+            logger.info(
+                "      Page content progress: %d/%d (%s -> %s)",
+                completed,
+                len(candidates),
+                result.title or result.onenote_id,
+                result.sync_status.value,
+            )
+
+    async def _build_page_content_result(
+        self, page: PageResponse, access_token: str
+    ) -> PageContentSyncResult:
         logger.info("      Syncing page '%s'", page.title or page.onenote_id)
         try:
             page_content = await self._graph_client.get_page_content_with_ink(access_token, page.onenote_id)
@@ -336,51 +415,91 @@ class SyncService:
             if page_content.has_handwriting and not page_content.ink_strokes:
                 logger.warning("        InkML fetch failed — ink will not appear in composite")
 
-            # Fetch all images in parallel
-            image_bytes_map: dict[str, bytes] = {}
-            if image_elements:
-                urls = [element.image_url for element in image_elements]
-                results = await asyncio.gather(
-                    *[self._graph_client.get_page_image(access_token, url) for url in urls],
-                    return_exceptions=True,
-                )
-                for url, result in zip(urls, results):
-                    if isinstance(result, Exception):
-                        logger.warning("        Failed to fetch image: %s", result)
-                    else:
-                        image_bytes_map[url] = result  # type: ignore[assignment]
+            image_bytes_map = await self._fetch_page_images(image_elements, access_token)
 
             # Build composite canvas (images at CSS positions, ink strokes on top) and OCR it.
             # Single Vision call per page — the renderer clamps scale so the canvas fits Vision's cap.
-            composite_bytes = composite_page(page_content.elements, image_bytes_map, page_content.ink_strokes)
+            # Pillow is CPU-bound, so run it in a thread to avoid blocking the event loop (and the
+            # other page workers) during decode/resize/paste/draw.
+            composite_bytes = await asyncio.to_thread(
+                composite_page, page_content.elements, image_bytes_map, page_content.ink_strokes
+            )
 
             ocr_text = ""
             if composite_bytes is not None:
                 if self._ocr_client is not None:
-                    ocr_text = await asyncio.to_thread(self._ocr_client.run_ocr, composite_bytes)
+                    ocr_text = await self._ocr_client.run_ocr_async(composite_bytes)
                     logger.info("        Composite OCR: %d chars", len(ocr_text))
                 else:
                     logger.info("        Composite built but OCR client not loaded — skipping")
 
-            # Assemble: typed text in visual order, then composite OCR
-            text_parts = [element.text for element in text_elements if element.text]
-            if ocr_text:
-                text_parts.append(ocr_text)
-
-            content = "\n\n".join(text_parts)
+            content = self._assemble_page_content(text_elements, ocr_text)
             logger.info("        Final content: %d chars", len(content))
 
+            return PageContentSyncResult(
+                page_id=page.id,
+                title=page.title,
+                onenote_id=page.onenote_id,
+                content=content,
+                content_hash=_compute_hash(content),
+                sync_status=PageSyncStatus.FRESH,
+            )
+        except Exception as error:
+            logger.exception("      Failed to sync content for page '%s'", page.title or page.onenote_id)
+            return PageContentSyncResult(
+                page_id=page.id,
+                title=page.title,
+                onenote_id=page.onenote_id,
+                sync_status=PageSyncStatus.FAILED,
+                error_message=str(error),
+            )
+
+    async def _fetch_page_images(
+        self, image_elements: list[GraphPageElement], access_token: str
+    ) -> dict[str, bytes]:
+        image_bytes_map: dict[str, bytes] = {}
+        urls = [element.image_url for element in image_elements if element.image_url]
+        if not urls:
+            return image_bytes_map
+
+        results = await asyncio.gather(
+            *[self._graph_client.get_page_image(access_token, url) for url in urls],
+            return_exceptions=True,
+        )
+        for url, result in zip(urls, results):
+            if isinstance(result, Exception):
+                logger.warning("        Failed to fetch image: %s", result)
+            else:
+                image_bytes_map[url] = result
+        return image_bytes_map
+
+    def _assemble_page_content(
+        self, text_elements: list[GraphPageElement], ocr_text: str
+    ) -> str:
+        text_parts = [element.text for element in text_elements if element.text]
+        if ocr_text:
+            text_parts.append(ocr_text)
+        return "\n\n".join(text_parts)
+
+    async def _apply_page_content_result(self, result: PageContentSyncResult) -> None:
+        if result.sync_status == PageSyncStatus.FRESH and result.content is not None:
             await self._page_repo.update(
-                page.id,
+                result.page_id,
                 PageUpdate(
-                    content=content,
-                    content_hash=_compute_hash(content),
+                    content=result.content,
+                    content_hash=result.content_hash,
                     sync_status=PageSyncStatus.FRESH,
                 ),
             )
-        except Exception:
-            logger.exception("      Failed to sync content for page '%s'", page.title or page.onenote_id)
-            await self._page_repo.update(page.id, PageUpdate(sync_status=PageSyncStatus.FAILED))
+        else:
+            if result.error_message:
+                logger.warning(
+                    "      Marking page '%s' failed: %s",
+                    result.title or result.onenote_id,
+                    result.error_message,
+                )
+            await self._page_repo.update(result.page_id, PageUpdate(sync_status=PageSyncStatus.FAILED))
+        await self._session.commit()
 
 
 async def run_notebook_sync_background(notebook_id: int) -> None:
@@ -392,11 +511,11 @@ async def run_notebook_sync_background(notebook_id: int) -> None:
     which finalises the notebook to FRESH/FAILED. Mirrors `sync/run.py`'s wiring for
     a single notebook. The notebook is expected to already be marked SYNCING by
     `NotebookService.start_notebook_sync` before this is scheduled."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http_client:
+    async with GraphClient() as graph_client:
         async with AsyncSessionLocal() as session:
             service = SyncService(
                 session=session,
-                graph_client=GraphClient(http_client),
+                graph_client=graph_client,
                 msal_client=get_msal_client(),
                 ocr_client=get_ocr_client(),
             )
