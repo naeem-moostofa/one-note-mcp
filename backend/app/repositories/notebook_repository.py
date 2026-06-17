@@ -1,8 +1,8 @@
-from sqlalchemy import ColumnElement, delete, func, nullslast, select, update
+from sqlalchemy import ColumnElement, case, delete, func, nullslast, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Notebook
+from app.models import Notebook, NotebookSyncStatus
 from app.schemas import (
     NotebookCreate,
     NotebookFilter,
@@ -11,10 +11,23 @@ from app.schemas import (
     PaginatedResponse,
 )
 
-# Canonical web ordering: most-recently-edited first, never-synced (NULL) notebooks
-# last, name + id to keep duplicates/ties deterministic across pages. Mirrors what the
-# dashboard wants ("sort by last edited") and makes DB pagination consistent with it.
-_WEB_ORDER = (nullslast(Notebook.last_modified_datetime.desc()), func.lower(Notebook.display_name), Notebook.id)
+# Canonical web ordering: actively syncing notebooks first, then synced notebooks,
+# then everything else. Within each bucket, keep the existing most-recently-edited
+# ordering, with name + id as deterministic tie-breakers across paginated pages.
+_SYNC_PRIORITY = case(
+    (Notebook.sync_status == NotebookSyncStatus.SYNCING, 0),
+    (
+        (Notebook.sync_enabled.is_(True)) & (Notebook.sync_status == NotebookSyncStatus.FRESH),
+        1,
+    ),
+    else_=2,
+)
+_WEB_ORDER = (
+    _SYNC_PRIORITY,
+    nullslast(Notebook.last_modified_datetime.desc()),
+    func.lower(Notebook.display_name),
+    Notebook.id,
+)
 
 
 def _filter_conditions(user_id: int, filters: NotebookFilter) -> list[ColumnElement[bool]]:

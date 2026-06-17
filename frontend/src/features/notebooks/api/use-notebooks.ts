@@ -7,8 +7,8 @@ export const notebooksQueryKey = ['notebooks'] as const
 export const notebooksQueryKeyFor = (filters: NotebookFilter) => [...notebooksQueryKey, filters] as const
 
 // One filtered, paginated page of the user's notebooks (enabled and disabled) with
-// sync state. The backend orders by "last edited" (newest first), so the page arrives
-// ready to render — no client-side sort needed.
+// sync state. The backend promotes syncing/synced notebooks first, then orders each
+// bucket by "last edited" (newest first), so no client-side sort is needed.
 export function useNotebooks(filters: NotebookFilter = {}) {
   return useQuery({
     queryKey: notebooksQueryKeyFor(filters),
