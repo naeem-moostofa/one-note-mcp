@@ -5,9 +5,11 @@ import { useNotebooks } from '@/features/notebooks/api/use-notebooks'
 import { useRefreshNotebooks } from '@/features/notebooks/api/use-refresh-notebooks'
 import { useSyncNotebook } from '@/features/notebooks/api/use-sync-notebook'
 import { useToggleSync } from '@/features/notebooks/api/use-toggle-sync'
+import { CreateKeyBar, type SelectedNotebook } from '@/features/mcp-keys/components/create-key-bar'
+import { KeyRevealModal } from '@/features/mcp-keys/components/key-reveal-modal'
 import { NotebookCard } from '@/features/notebooks/components/notebook-card'
 import { beginMicrosoftLogin } from '@/lib/microsoft-login'
-import type { MicrosoftConnectionStatus, NotebookFilter, NotebookSyncStatus } from '@/types/api'
+import type { MCPConnectionCreated, MicrosoftConnectionStatus, NotebookFilter, NotebookSyncStatus, NotebookWebResponse } from '@/types/api'
 
 type SyncEnabledFilter = 'enabled' | 'disabled'
 
@@ -15,6 +17,7 @@ type SyncEnabledFilter = 'enabled' | 'disabled'
 const PAGE_SIZE = 50
 
 const syncStatusValues: NotebookSyncStatus[] = ['PENDING', 'SYNCING', 'FRESH', 'FAILED']
+const EMPTY_NOTEBOOKS: NotebookWebResponse[] = []
 const filterParsers = {
   search: parseAsString.withDefault(''),
   syncEnabled: parseAsStringEnum<SyncEnabledFilter>(['enabled', 'disabled']),
@@ -30,6 +33,10 @@ interface NotebookListProps {
 
 export function NotebookList({ microsoftStatus }: NotebookListProps) {
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [selectedNotebooks, setSelectedNotebooks] = useState<Map<number, SelectedNotebook>>(() => new Map())
+  const [allNotebooks, setAllNotebooks] = useState(false)
+  const [revealedKey, setRevealedKey] = useState<MCPConnectionCreated | null>(null)
+  const [revealedScope, setRevealedScope] = useState<SelectedNotebook[]>([])
   const searchDebounceTimeout = useRef<number | null>(null)
   const [urlFilters, setUrlFilters] = useQueryStates(filterParsers, {
     urlKeys: {
@@ -60,7 +67,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
     [filters, urlFilters.offset],
   )
   const { data: page, isPending, isError, refetch } = useNotebooks(apiFilters)
-  const notebooks = page?.data ?? []
+  const notebooks = page?.data ?? EMPTY_NOTEBOOKS
   const total = page?.total ?? 0
   const offset = urlFilters.offset
   const toggleSync = useToggleSync()
@@ -70,6 +77,15 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
   const connected = microsoftStatus === 'ACTIVE'
   const hasFilters = Object.keys(filters).length > 0
   const activeFilterCount = Object.keys(filters).length
+  const currentNotebookById = useMemo(() => new Map(notebooks.map((notebook) => [notebook.id, notebook])), [notebooks])
+  const selectedNotebookList = useMemo(() => {
+    return Array.from(selectedNotebooks.values())
+      .map((selected) => {
+        const current = currentNotebookById.get(selected.id)
+        return current ? { ...selected, sync_enabled: current.sync_enabled } : selected
+      })
+      .sort((left, right) => left.display_name.localeCompare(right.display_name))
+  }, [currentNotebookById, selectedNotebooks])
 
   useEffect(() => {
     return () => {
@@ -88,6 +104,45 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
       // Reset to the first page — a narrowed result set can't keep a stale offset.
       void setUrlFilters({ search: nextSearch || null, offset: 0 })
     }, 300)
+  }
+
+  function handleSelectNotebook(notebook: NotebookWebResponse, selected: boolean) {
+    setSelectedNotebooks((current) => {
+      const next = new Map(current)
+      if (selected) {
+        next.set(notebook.id, {
+          id: notebook.id,
+          display_name: notebook.display_name,
+          sync_enabled: notebook.sync_enabled,
+        })
+      } else {
+        next.delete(notebook.id)
+      }
+      return next
+    })
+  }
+
+  function handleAllNotebooksChange(next: boolean) {
+    setAllNotebooks(next)
+    if (next) {
+      setSelectedNotebooks(new Map())
+    }
+  }
+
+  function clearKeySelection() {
+    setAllNotebooks(false)
+    setSelectedNotebooks(new Map())
+  }
+
+  function handleKeyCreated(connection: MCPConnectionCreated, scope: SelectedNotebook[]) {
+    setRevealedKey(connection)
+    setRevealedScope(scope)
+  }
+
+  function closeRevealModal() {
+    setRevealedKey(null)
+    setRevealedScope([])
+    clearKeySelection()
   }
 
   return (
@@ -173,6 +228,16 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
         onClear={() => void setUrlFilters({ syncEnabled: null, syncStatus: null, offset: 0 })}
       />
 
+      {connected && (notebooks.length > 0 || selectedNotebookList.length > 0 || allNotebooks) && (
+        <CreateKeyBar
+          allNotebooks={allNotebooks}
+          selectedNotebooks={selectedNotebookList}
+          onAllNotebooksChange={handleAllNotebooksChange}
+          onClearSelection={clearKeySelection}
+          onCreated={handleKeyCreated}
+        />
+      )}
+
       {refresh.isError && (
         <p className="rounded-lg bg-warn-soft px-4 py-2 text-sm text-warn">
           Couldn’t refresh — make sure your Microsoft account is connected and try again.
@@ -213,6 +278,9 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
               onToggle={(id, syncEnabled) => toggleSync.mutate({ id, syncEnabled })}
               onSync={(id) => syncNotebook.mutate(id)}
               disabled={toggleSync.pendingNotebookIds.has(notebook.id)}
+              selected={selectedNotebooks.has(notebook.id)}
+              onSelectChange={handleSelectNotebook}
+              selectionDisabled={allNotebooks}
             />
           ))}
           <PaginationControls
@@ -223,6 +291,10 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
             onNext={() => void setUrlFilters({ offset: offset + PAGE_SIZE })}
           />
         </div>
+      )}
+
+      {revealedKey && (
+        <KeyRevealModal connection={revealedKey} scopedNotebooks={revealedScope} onDone={closeRevealModal} />
       )}
     </section>
   )

@@ -44,3 +44,21 @@ export interface NotebookFilter {
   limit?: number
   offset?: number
 }
+
+// POST /api/mcp-connections -> MCPConnectionCreatedResponse
+export interface MCPConnectionCreated {
+  id: number
+  display_name: string | null
+  scope_all_notebooks: boolean
+  notebook_ids: number[] | null
+  created_at: string
+  raw_token: string
+  mcp_url: string
+}
+
+// POST /api/mcp-connections body -> MCPConnectionCreateRequest
+export interface CreateMCPConnectionRequest {
+  display_name?: string
+  scope_all_notebooks: boolean
+  notebook_ids?: number[]
+}

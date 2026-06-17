@@ -7,22 +7,22 @@
   ad-hoc hex values, which keeps the palette consistent and easy to retune here.
 */
 @theme {
-  --color-canvas: #f6f7fb; /* page background — soft off-white */
+  --color-canvas: #f4f7f4; /* page background — soft mineral white */
   --color-surface: #ffffff; /* cards / bars */
-  --color-ink: #1f2333; /* primary text */
-  --color-muted: #6b7280; /* secondary text */
-  --color-line: #e8e9f1; /* hairline borders */
+  --color-ink: #17231f; /* primary text */
+  --color-muted: #64716c; /* secondary text */
+  --color-line: #dfe7e2; /* hairline borders */
 
-  --color-brand: #6366f1; /* indigo accent */
-  --color-brand-hover: #4f46e5;
-  --color-brand-soft: #eef0ff; /* tinted brand background */
+  --color-brand: #147a6d; /* mineral green accent */
+  --color-brand-hover: #0f6157;
+  --color-brand-soft: #dff3ee; /* tinted brand background */
 
-  --color-ok: #16a34a; /* synced */
-  --color-ok-soft: #e9f7ee;
-  --color-busy: #2563eb; /* syncing */
-  --color-busy-soft: #e8efff;
-  --color-warn: #d97706; /* failed / needs attention */
-  --color-warn-soft: #fdf2e3;
+  --color-ok: #167a4a; /* synced */
+  --color-ok-soft: #e1f3e8;
+  --color-busy: #3b6ea8; /* syncing */
+  --color-busy-soft: #e4edf7;
+  --color-warn: #b45f06; /* failed / needs attention */
+  --color-warn-soft: #fff1dc;
 }
 
 html,
