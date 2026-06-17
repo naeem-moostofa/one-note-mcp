@@ -53,9 +53,15 @@ class SyncWorker:
         self._msal_client = None
         self._ocr_client = None
 
-    async def run(self) -> None:
+    def request_shutdown(self) -> None:
+        """Cooperatively stop the run loop — used when the worker is embedded in another
+        process (e.g. the API's lifespan) and shutdown is driven by that host, not signals."""
+        self._shutdown.set()
+
+    async def run(self, *, install_signal_handlers: bool = True) -> None:
         logger.info("Sync worker starting (sole Graph executor)")
-        self._install_signal_handlers()
+        if install_signal_handlers:
+            self._install_signal_handlers()
         async with GraphClient() as graph_client:
             self._graph_client = graph_client
             self._msal_client = get_msal_client()

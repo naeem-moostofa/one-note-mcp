@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +11,9 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 from app.mcp.server import mcp_app
 from app.routers import auth, mcp_connections, me, notebooks
+from sync.worker import SyncWorker
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -18,8 +23,24 @@ async def lifespan(app: FastAPI):
     # nested lifespans, so we drive it from ours.
     async with GraphClient() as graph_client:
         app.state.graph_client = graph_client
-        async with mcp_app.lifespan(app):
-            yield
+
+        # Optionally drain the sync queue in-process so a UI sync starts right away without a
+        # separate `python -m sync.worker`. Gated by config because it only preserves the
+        # single-Graph-executor invariant at one web replica with no standalone worker/cron.
+        worker = SyncWorker() if settings.SYNC_WORKER_IN_PROCESS else None
+        worker_task = (
+            asyncio.create_task(worker.run(install_signal_handlers=False)) if worker else None
+        )
+        if worker:
+            logger.info("In-process sync worker enabled (SYNC_WORKER_IN_PROCESS=True)")
+
+        try:
+            async with mcp_app.lifespan(app):
+                yield
+        finally:
+            if worker and worker_task:
+                worker.request_shutdown()
+                await worker_task
 
 
 app = FastAPI(lifespan=lifespan)

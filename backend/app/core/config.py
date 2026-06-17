@@ -31,6 +31,14 @@ class Settings(BaseSettings):
 
     # Durable sync-job queue (Phase 2). The worker is the *single* Graph executor; these tune
     # how it drains `sync_jobs`. See plans/sync-rate-limit-fix-plan.md (single-executor invariant).
+    # Run the sync worker *inside* the API process (as a lifespan task) instead of as a separate
+    # `python -m sync.worker`. Lets a UI sync start almost immediately without a second process.
+    # SINGLE-EXECUTOR INVARIANT: only safe when exactly one web replica runs AND you are NOT also
+    # running the standalone worker or the cron — otherwise you get multiple Graph rate limiters and
+    # the 429 storm returns. Keep this False in multi-replica/production (use the dedicated worker
+    # service there); enable it for single-process local dev. See plans/sync-rate-limit-fix-plan.md.
+    SYNC_WORKER_IN_PROCESS: bool = False
+
     SYNC_WORKER_POLL_INTERVAL_S: float = 5.0   # idle sleep between empty claim attempts
     SYNC_JOB_LEASE_S: float = 120.0            # lease length; a crashed worker's jobs reap after this
     SYNC_JOB_HEARTBEAT_S: float = 30.0         # how often a running job refreshes its lease

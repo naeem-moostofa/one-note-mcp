@@ -185,12 +185,18 @@ class SyncService:
                 connection.id,
                 MicrosoftConnectionUpdate(status=MicrosoftConnectionStatus.NEEDS_REAUTH),
             )
+            await self._session.commit()  # persist the status flip and release the row lock now
             return None
 
         await self._connection_repo.update(
             connection.id,
             MicrosoftConnectionUpdate(encrypted_msal_token_cache=encrypt(token_result.serialized_cache)),
         )
+        # Commit immediately: this write takes a row lock on the connection, and the caller goes
+        # on to make Graph network calls (get_notebooks/sections/pages). Holding the lock across
+        # that I/O serialized concurrent token acquisitions and let a process killed mid-request
+        # orphan the lock indefinitely — every later request on this row then hung. Short txn.
+        await self._session.commit()
         return token_result.access_token
 
     async def _discover_notebooks(self, user_id: int, access_token: str) -> list[NotebookResponse]:
