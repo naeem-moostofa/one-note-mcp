@@ -3,7 +3,14 @@ from typing import Generic, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models import MicrosoftConnectionStatus, NotebookSyncStatus, PageSyncStatus
+from app.models import (
+    MicrosoftConnectionStatus,
+    NotebookSyncStatus,
+    PageSyncStatus,
+    SyncJobKind,
+    SyncJobSource,
+    SyncJobStatus,
+)
 
 T = TypeVar("T")
 
@@ -430,3 +437,33 @@ class PageContentSyncResult(BaseModel):
     content_hash: str | None = None
     sync_status: PageSyncStatus = PageSyncStatus.FRESH
     error_message: str | None = None
+
+
+# --- Sync-job queue schemas (Phase 2) ---
+
+
+class SyncJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: SyncJobKind
+    connection_id: int
+    user_id: int
+    notebook_id: Optional[int] = None
+    status: SyncJobStatus
+    source: SyncJobSource
+    priority: int
+    attempts: int
+    max_attempts: int
+    next_run_at: datetime
+    lease_expires_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class ReapResult(BaseModel):
+    """Outcome of one reaper sweep over expired-lease orphan jobs."""
+    requeued_ids: list[int] = Field(default_factory=list)
+    failed_notebook_ids: list[int] = Field(default_factory=list)  # notebooks to reconcile -> FAILED

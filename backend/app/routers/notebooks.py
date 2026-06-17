@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, Depends
 
 from app.core.auth import get_current_user_id
 from app.routers.deps import get_notebook_service, get_sync_service
@@ -11,7 +11,7 @@ from app.schemas import (
     PaginatedResponse,
 )
 from app.services.notebook_service import NotebookService
-from app.services.sync_service import SyncService, run_notebook_sync_background
+from app.services.sync_service import SyncService
 
 router = APIRouter(prefix="/api/notebooks", tags=["notebooks"])
 
@@ -51,15 +51,13 @@ async def refresh_notebooks(
 @router.post("/{notebook_id}/sync", status_code=202)
 async def sync_notebook(
     notebook_id: int,
-    background_tasks: BackgroundTasks,
     user_id: Annotated[int, Depends(get_current_user_id)],
     service: Annotated[NotebookService, Depends(get_notebook_service)],
 ) -> None:
-    """Start a background notebook sync (sections + pages + OCR) for one notebook.
+    """Enqueue a notebook sync (sections + pages + OCR) for one notebook.
 
-    Returns 202 with no body — the notebook is marked SYNCING and the client polls
-    GET /api/notebooks to watch it reach FRESH/FAILED. If the notebook is already
-    syncing this is a no-op (no duplicate run)."""
-    started = await service.start_notebook_sync(user_id, notebook_id)  # 404/403 + SYNCING guard
-    if started:
-        background_tasks.add_task(run_notebook_sync_background, notebook_id)
+    Returns 202 with no body — a job is queued for the worker (the sole Graph
+    executor), the notebook is marked SYNCING, and the client polls GET /api/notebooks
+    to watch it reach FRESH/FAILED. Enqueue is idempotent: a duplicate click while a
+    job is already active collapses to the existing job (no second run)."""
+    await service.start_notebook_sync(user_id, notebook_id)  # 404/403/409 + idempotent enqueue

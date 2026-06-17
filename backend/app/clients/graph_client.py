@@ -2,8 +2,11 @@ import asyncio
 import email
 import io
 import logging
+import random
 import re
+import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from typing import TypeAlias, TypeVar
 
 import httpx
@@ -20,7 +23,9 @@ _BASE_URL = "https://graph.microsoft.com/v1.0"
 # Beta uses the same /me/onenote/ path as v1.0, just against the beta base URL
 _BETA_URL = "https://graph.microsoft.com/beta"
 _INK_NODE_COMMENT = "<!-- InkNode is not supported -->"
-_MAX_RETRIES = 5
+# Bumped from 5: with the rate limiter in place a request rarely needs this many, but it
+# lets a page survive one throttling window instead of failing and amplifying the next run.
+_MAX_RETRIES = 8
 _INKML_NS = "http://www.w3.org/2003/InkML"
 # 1 HiMetric = 0.01 mm; at 96 DPI: px = himetric * 96 / 2540.
 _HIMETRIC_TO_PX_BASE = 96.0 / 2540.0
@@ -41,6 +46,18 @@ logger = logging.getLogger(__name__)
 
 
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+# 429 (throttled) and 503 (overloaded) additionally trip an account-wide cooldown that pauses
+# every in-flight + future request, not just the one that failed.
+_THROTTLE_STATUS_CODES = {429, 503}
+
+# Adaptive cooldown. OneNote sends no Retry-After, so on a throttle we compute our own pause
+# and escalate it on consecutive throttles, decaying back after a quiet stretch.
+_COOLDOWN_BASE_S = 1.0
+_COOLDOWN_CAP_S = 60.0
+_COOLDOWN_JITTER_S = 1.0
+_COOLDOWN_MAX_LEVEL = 8
+_RETRY_AFTER_CAP_S = 120.0
+_THROTTLE_DECAY_S = 120.0
 
 # OneNote/Graph allows 5 concurrent requests per app per user. With a single Microsoft
 # account this is process-wide, so a module-level semaphore (shared by every GraphClient
@@ -50,8 +67,110 @@ _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 _graph_semaphore = asyncio.Semaphore(settings.SYNC_GRAPH_CONCURRENCY)
 
 
+class _GraphRateLimiter:
+    """Process-wide sliding-window rate limiter + adaptive throttle cooldown for OneNote/Graph.
+
+    Honors both documented OneNote limits at once (per-minute and per-hour) by keeping a log
+    of recent request timestamps and counting each window. A 429/503 sets a shared
+    ``_paused_until`` deadline that every request observes in ``acquire()``, so one throttle
+    backs off the whole executor rather than just the failing request. State is in-process, so
+    it is correct only while a single process makes Graph calls (see the rate-limit plan's
+    deployment notes). The window/cooldown math lives in pure, lock-held helpers (``_reserve``,
+    ``_apply_throttle``) so it can be unit-tested with an injected clock and no real sleeping.
+    """
+
+    def __init__(self, per_minute: int, per_hour: int, clock=time.monotonic) -> None:
+        self._per_minute = per_minute
+        self._per_hour = per_hour
+        self._clock = clock
+        self._request_times: deque[float] = deque()
+        self._paused_until = 0.0
+        self._throttle_level = 0
+        self._last_throttle_at = 0.0
+        self._lock = asyncio.Lock()
+
+    def _reserve(self, now: float) -> float | None:
+        """Decide whether a request may go now. Caller must hold ``self._lock``.
+
+        Returns None and records the request when allowed, otherwise the number of seconds to
+        wait before re-checking."""
+        if now < self._paused_until:
+            return self._paused_until - now
+
+        # Forget the escalation once we've had a quiet stretch with no throttling.
+        if self._throttle_level and now - self._last_throttle_at > _THROTTLE_DECAY_S:
+            self._throttle_level = 0
+
+        hour_cutoff = now - 3600
+        while self._request_times and self._request_times[0] <= hour_cutoff:
+            self._request_times.popleft()
+
+        minute_cutoff = now - 60
+        count_minute = sum(1 for timestamp in self._request_times if timestamp > minute_cutoff)
+        count_hour = len(self._request_times)
+
+        if count_minute < self._per_minute and count_hour < self._per_hour:
+            self._request_times.append(now)
+            return None
+
+        waits: list[float] = []
+        if count_minute >= self._per_minute:
+            oldest_in_minute = next(t for t in self._request_times if t > minute_cutoff)
+            waits.append(oldest_in_minute + 60 - now)
+        if count_hour >= self._per_hour:
+            waits.append(self._request_times[0] + 3600 - now)
+        return max(min(waits), 0.0)
+
+    async def acquire(self) -> None:
+        """Block until both rate windows have room and no cooldown is active."""
+        while True:
+            async with self._lock:
+                wait = self._reserve(self._clock())
+                if wait is None:
+                    return
+            await asyncio.sleep(max(wait, 0.0))
+
+    def _apply_throttle(self, now: float, retry_after: float) -> None:
+        """Escalate the shared cooldown after a throttle. Caller must hold ``self._lock``."""
+        self._throttle_level = min(self._throttle_level + 1, _COOLDOWN_MAX_LEVEL)
+        cooldown = min(_COOLDOWN_CAP_S, _COOLDOWN_BASE_S * 2 ** (self._throttle_level - 1))
+        cooldown += random.uniform(0, _COOLDOWN_JITTER_S)
+        cooldown = max(cooldown, retry_after)
+        self._last_throttle_at = now
+        self._paused_until = max(self._paused_until, now + cooldown)
+        logger.warning(
+            "graph_cooldown level=%d pause_s=%.1f retry_after=%.1f",
+            self._throttle_level, self._paused_until - now, retry_after,
+        )
+
+    async def register_throttle(self, retry_after: float = 0.0) -> None:
+        async with self._lock:
+            self._apply_throttle(self._clock(), retry_after)
+
+
+_rate_limiter = _GraphRateLimiter(
+    settings.SYNC_GRAPH_RATE_PER_MINUTE, settings.SYNC_GRAPH_RATE_PER_HOUR
+)
+
+
 def _is_retryable(error: BaseException) -> bool:
-    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in _RETRYABLE_STATUS_CODES
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in _RETRYABLE_STATUS_CODES
+    # Transport-level failures (timeouts, connection/read/protocol errors) are transient under
+    # load — these previously failed a page on the first occurrence.
+    return isinstance(error, httpx.TransportError)
+
+
+def _parse_retry_after(response: httpx.Response) -> float:
+    """Seconds from a Retry-After header (delta-seconds form only), capped. OneNote omits it,
+    but other Graph endpoints may send it and honoring it is correct and cheap."""
+    value = response.headers.get("retry-after")
+    if not value:
+        return 0.0
+    try:
+        return min(float(value), _RETRY_AFTER_CAP_S)
+    except ValueError:
+        return 0.0  # HTTP-date form unsupported; fall back to the computed backoff
 
 
 def _raise_graph_api_error(retry_state) -> None:
@@ -75,6 +194,19 @@ def _log_graph_retry(retry_state: RetryCallState) -> None:
         retry_state.next_action.sleep if retry_state.next_action else 0,
         retry_after or "-",
     )
+
+
+_exponential_wait = wait_random_exponential(multiplier=1, max=60)
+
+
+def _retry_wait(retry_state: RetryCallState) -> float:
+    """Tenacity wait. Throttle codes wait ~0 here because the account-wide cooldown is applied
+    at the rate limiter's ``acquire()`` gate (avoids double-sleeping the failing request);
+    other retryable errors (502/504, transport timeouts) get per-request exponential backoff."""
+    error = retry_state.outcome.exception() if retry_state.outcome else None
+    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in _THROTTLE_STATUS_CODES:
+        return 0.0
+    return _exponential_wait(retry_state)
 
 
 def _parse_css_px(style: str, prop: str) -> float:
@@ -256,18 +388,24 @@ class GraphClient:
 
     @retry(
         retry=retry_if_exception(_is_retryable),
-        wait=wait_random_exponential(multiplier=1, max=60),
+        wait=_retry_wait,
         stop=stop_after_attempt(_MAX_RETRIES),
         before_sleep=_log_graph_retry,
         retry_error_callback=_raise_graph_api_error,
     )
     async def _get(self, url: str, access_token: str) -> httpx.Response:
-        # Acquire inside the retried body so backoff sleeps between attempts (up to 60s)
-        # release the slot rather than holding one of the 5 the whole time.
+        # Pace against the OneNote rate limits and honor any active throttle cooldown BEFORE
+        # taking a concurrency slot, so a backoff/cooldown wait releases the slot rather than
+        # holding one of the 5 the whole time.
+        await _rate_limiter.acquire()
         async with _graph_semaphore:
             response = await self._client.get(url, headers=self._headers(access_token))
-            response.raise_for_status()
-            return response
+        # A throttle/overload response pauses the whole executor — record it before raising so
+        # tenacity retries and every worker observes the cooldown at its next acquire().
+        if response.status_code in _THROTTLE_STATUS_CODES:
+            await _rate_limiter.register_throttle(_parse_retry_after(response))
+        response.raise_for_status()
+        return response
 
     async def _get_all(self, url: str, access_token: str, model: type[_M]) -> list[_M]:
         items: list[_M] = []

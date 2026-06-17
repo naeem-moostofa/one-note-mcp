@@ -6,10 +6,9 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.graph_client import GraphClient, composite_page
-from app.clients.msal_client import MSALClient, get_msal_client
-from app.clients.ocr_client import OCRClient, get_ocr_client
+from app.clients.msal_client import MSALClient
+from app.clients.ocr_client import OCRClient
 from app.core.config import settings
-from app.core.database import AsyncSessionLocal
 from app.core.encryption import decrypt, encrypt
 from app.core.exceptions import ConflictError, MSALAuthError
 from app.models import MicrosoftConnectionStatus, NotebookSyncStatus, PageSyncStatus
@@ -109,17 +108,51 @@ class SyncService:
             )
             logger.info("Synced %d notebooks for user %s", len(db_notebooks), connection.user_id)
 
-    async def sync_single_notebook(self, notebook_id: int) -> None:
-        """Sync one notebook's sections + pages (+ OCR) by DB id.
+    async def sync_notebook_content(self, notebook_id: int) -> datetime | None:
+        """Core content sync for one notebook (token → sections → pages → OCR).
 
-        Marks the notebook SYNCING, does the work, and always finalises it to FRESH
-        or FAILED — never raises on a sync failure and never leaves it stuck in
-        SYNCING. Setting SYNCING is idempotent, so it's safe whether or not the
-        caller pre-marked it (the web guard `NotebookService.start_notebook_sync`
-        does; the CLI doesn't). Uses the cron's stale-page detection
-        (`_sync_notebook` → `_sync_section`). Shared by the CLI (`--notebook-id`) and
-        the web background path; matches how the cron handles a per-notebook failure
-        (log + FAILED, no re-raise)."""
+        Returns the newest page lastModifiedDateTime (None if the notebook has no
+        pages), which the caller writes when finalising the notebook FRESH. Raises
+        on failure and does **not** touch the notebook's `sync_status` — the caller
+        owns that transition: the worker drives it for job-level retry/backoff, and
+        `sync_single_notebook` wraps this for the inline CLI path. Setting status
+        here would conflict with both."""
+        notebook = await self._notebook_repo.get_by_id(notebook_id)
+        if notebook is None:
+            logger.warning("sync_notebook_content: notebook %s not found", notebook_id)
+            return None
+        connection = await self._connection_repo.get_by_user_id(notebook.user_id)
+        if connection is None:
+            raise RuntimeError(f"No Microsoft connection for user {notebook.user_id}")
+        access_token = await self._acquire_token(connection)
+        if access_token is None:
+            raise RuntimeError("Re-auth required — reconnect your Microsoft account")
+        return await self._sync_notebook(notebook, access_token)
+
+    async def discover_notebooks(self, connection_id: int) -> list[NotebookResponse]:
+        """Names-only discovery for one connection: list → upsert → delete-stale.
+
+        Worker entry point for a `discovery` job. Raises if the connection is gone or
+        needs re-auth so the job records a clear error instead of silently no-opping."""
+        connection = await self._connection_repo.get_by_id(connection_id)
+        if connection is None:
+            raise RuntimeError(f"Microsoft connection {connection_id} not found")
+        if connection.status != MicrosoftConnectionStatus.ACTIVE:
+            raise RuntimeError("Microsoft connection needs re-auth")
+        access_token = await self._acquire_token(connection)
+        if access_token is None:
+            raise RuntimeError("Re-auth required — reconnect your Microsoft account")
+        return await self._discover_notebooks(connection.user_id, access_token)
+
+    async def sync_single_notebook(self, notebook_id: int) -> None:
+        """Inline single-notebook sync by DB id — self-contained status management.
+
+        Marks the notebook SYNCING, does the work via `sync_notebook_content`, and
+        always finalises it to FRESH or FAILED — never raises on a sync failure and
+        never leaves it stuck in SYNCING. Used by the CLI debug path
+        (`python -m sync.run --notebook-id … --run-inline`). The durable web/cron
+        path instead goes through the queue, where the worker owns the same
+        transitions plus job-level retry."""
         notebook = await self._notebook_repo.get_by_id(notebook_id)
         if notebook is None:
             logger.warning("sync_single_notebook: notebook %s not found", notebook_id)
@@ -128,13 +161,7 @@ class SyncService:
         await self._notebook_repo.update(notebook_id, NotebookUpdate(sync_status=NotebookSyncStatus.SYNCING))
         await self._session.commit()
         try:
-            connection = await self._connection_repo.get_by_user_id(notebook.user_id)
-            if connection is None:
-                raise RuntimeError(f"No Microsoft connection for user {notebook.user_id}")
-            access_token = await self._acquire_token(connection)
-            if access_token is None:
-                raise RuntimeError("Re-auth required — reconnect your Microsoft account")
-            latest_page_modified = await self._sync_notebook(notebook, access_token)
+            latest_page_modified = await self.sync_notebook_content(notebook_id)
             await self._notebook_repo.update(
                 notebook_id,
                 _finalize_fresh_update(sync_started_at, latest_page_modified),
@@ -500,28 +527,3 @@ class SyncService:
                 )
             await self._page_repo.update(result.page_id, PageUpdate(sync_status=PageSyncStatus.FAILED))
         await self._session.commit()
-
-
-async def run_notebook_sync_background(notebook_id: int) -> None:
-    """Self-contained background entry point for a web-triggered notebook sync.
-
-    Owns the whole lifecycle so the router doesn't have to: its own HTTP + DB
-    session (the request's session is already closed), the MSAL + OCR clients, and
-    commit/rollback. Delegates the actual work to `SyncService.sync_single_notebook`,
-    which finalises the notebook to FRESH/FAILED. Mirrors `sync/run.py`'s wiring for
-    a single notebook. The notebook is expected to already be marked SYNCING by
-    `NotebookService.start_notebook_sync` before this is scheduled."""
-    async with GraphClient() as graph_client:
-        async with AsyncSessionLocal() as session:
-            service = SyncService(
-                session=session,
-                graph_client=graph_client,
-                msal_client=get_msal_client(),
-                ocr_client=get_ocr_client(),
-            )
-            try:
-                await service.sync_single_notebook(notebook_id)
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                logger.exception("Background sync crashed for notebook %s", notebook_id)

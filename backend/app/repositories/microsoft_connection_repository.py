@@ -10,6 +10,10 @@ class MicrosoftConnectionRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def get_by_id(self, connection_id: int) -> MicrosoftConnectionResponse | None:
+        row = await self.session.get(MicrosoftConnection, connection_id)
+        return MicrosoftConnectionResponse.model_validate(row) if row else None
+
     async def get_by_user_id(self, user_id: int) -> MicrosoftConnectionResponse | None:
         row = await self.session.scalar(
             select(MicrosoftConnection).where(MicrosoftConnection.user_id == user_id)
