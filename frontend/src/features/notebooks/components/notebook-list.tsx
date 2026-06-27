@@ -38,6 +38,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
   const [revealedKey, setRevealedKey] = useState<MCPConnectionCreated | null>(null)
   const [revealedScope, setRevealedScope] = useState<SelectedNotebook[]>([])
   const searchDebounceTimeout = useRef<number | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const [urlFilters, setUrlFilters] = useQueryStates(filterParsers, {
     urlKeys: {
       search: 'search',
@@ -95,15 +96,45 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
     }
   }, [])
 
-  function handleSearchInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const nextSearch = event.target.value.trim()
+  useEffect(() => {
+    if (searchInputRef.current !== null && document.activeElement !== searchInputRef.current) {
+      searchInputRef.current.value = urlFilters.search
+    }
+  }, [urlFilters.search])
+
+  function clearSearchDebounce() {
     if (searchDebounceTimeout.current !== null) {
       window.clearTimeout(searchDebounceTimeout.current)
+      searchDebounceTimeout.current = null
     }
+  }
+
+  function handleSearchInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const nextSearch = event.target.value
+    clearSearchDebounce()
     searchDebounceTimeout.current = window.setTimeout(() => {
       // Reset to the first page — a narrowed result set can't keep a stale offset.
-      void setUrlFilters({ search: nextSearch || null, offset: 0 })
+      const trimmedSearch = nextSearch.trim()
+      void setUrlFilters({ search: trimmedSearch || null, offset: 0 })
     }, 300)
+  }
+
+  function setSearchInputDomValue(value: string) {
+    if (searchInputRef.current !== null) {
+      searchInputRef.current.value = value
+    }
+  }
+
+  function clearSearchFilter() {
+    clearSearchDebounce()
+    setSearchInputDomValue('')
+    void setUrlFilters({ search: null, offset: 0 })
+  }
+
+  function clearAllFilters() {
+    clearSearchDebounce()
+    setSearchInputDomValue('')
+    void setUrlFilters(null)
   }
 
   function handleSelectNotebook(notebook: NotebookWebResponse, selected: boolean) {
@@ -173,7 +204,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
             </label>
             <input
               id="notebook-search"
-              key={urlFilters.search}
+              ref={searchInputRef}
               type="search"
               defaultValue={urlFilters.search}
               onChange={handleSearchInputChange}
@@ -193,7 +224,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
         {hasFilters && (
           <div className="flex flex-wrap gap-2">
             {filters.search && (
-              <ActiveFilterChip label={`Name: ${filters.search}`} onRemove={() => void setUrlFilters({ search: null, offset: 0 })} />
+              <ActiveFilterChip label={`Name: ${filters.search}`} onRemove={clearSearchFilter} />
             )}
             {urlFilters.syncEnabled && (
               <ActiveFilterChip
@@ -209,7 +240,7 @@ export function NotebookList({ microsoftStatus }: NotebookListProps) {
             )}
             <button
               type="button"
-              onClick={() => void setUrlFilters(null)}
+              onClick={clearAllFilters}
               className="rounded-full px-3 py-1 text-xs font-medium text-muted transition-colors hover:bg-brand-soft hover:text-brand"
             >
               Clear all
