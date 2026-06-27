@@ -23,11 +23,19 @@ class Settings(BaseSettings):
     MCP_SERVER_URL: str
     SYNC_PAGE_WORKER_CONCURRENCY: int = 10
     SYNC_GRAPH_CONCURRENCY: int = 5
-    # Documented OneNote per-app-per-user request limits; the sliding-window limiter in
-    # graph_client enforces both. Dial down if 429s cluster at a window edge.
-    SYNC_GRAPH_RATE_PER_MINUTE: int = 120
+    # OneNote per-app-per-user request limits; the sliding-window limiter in graph_client
+    # enforces both windows. The documented maxima are 120/min and 400/hr, but the per-image
+    # `$value` route throttles below those, so the per-minute knob is set under the documented
+    # max to stop 429s clustering at the window edge. Tuning direction is *down*, never up.
+    SYNC_GRAPH_RATE_PER_MINUTE: int = 90
     SYNC_GRAPH_RATE_PER_HOUR: int = 400
     SYNC_VISION_CONCURRENCY: int = 10
+
+    # PDF file-printout extraction (see plans/attachment-fetch-optimization.md). A PDF printout's
+    # source file is fetched once and text is pulled locally with PyMuPDF; a page falls back to
+    # Vision OCR only when its embedded text is shorter than the threshold (a figure/scan page).
+    SYNC_PDF_OCR_TEXT_THRESHOLD: int = 50          # chars; below this a page is treated as figure-only
+    SYNC_PDF_RENDER_DPI: int = 150                 # local render scale for OCR'd pages (probe default; not a tuned optimum)
 
     # Durable sync-job queue (Phase 2). The worker is the *single* Graph executor; these tune
     # how it drains `sync_jobs`. See plans/sync-rate-limit-fix-plan.md (single-executor invariant).

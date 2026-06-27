@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import logging
 from datetime import datetime, timezone
 
@@ -34,12 +33,9 @@ from app.schemas import (
     SectionResponse,
     SectionSyncPlan,
 )
+from app.utils.pdf_extract import extract_pdf, merge_pdf_text
 
 logger = logging.getLogger(__name__)
-
-
-def _compute_hash(content: str) -> str:
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def _finalize_fresh_update(
@@ -440,10 +436,11 @@ class SyncService:
 
             text_elements = [element for element in page_content.elements if element.kind == "text" and element.text]
             image_elements = [element for element in page_content.elements if element.kind == "image" and element.image_url]
+            pdf_elements = [element for element in page_content.elements if element.kind == "pdf_attachment" and element.resource_url]
 
             logger.info(
-                "        %d text block(s), %d image(s), handwriting=%s",
-                len(text_elements), len(image_elements), page_content.has_handwriting,
+                "        %d text block(s), %d image(s), %d pdf attachment(s), handwriting=%s",
+                len(text_elements), len(image_elements), len(pdf_elements), page_content.has_handwriting,
             )
             if page_content.has_handwriting and not page_content.ink_strokes:
                 logger.warning("        InkML fetch failed — ink will not appear in composite")
@@ -466,7 +463,11 @@ class SyncService:
                 else:
                     logger.info("        Composite built but OCR client not loaded — skipping")
 
-            content = self._assemble_page_content(text_elements, ocr_text)
+            # PDF "file printouts": fetch each source PDF once and extract text locally (+ OCR the
+            # figure pages) instead of fetching N rasterized page-images. See plans/.
+            pdf_texts = await self._extract_pdf_attachments(pdf_elements, access_token)
+
+            content = self._assemble_page_content(text_elements, ocr_text, pdf_texts)
             logger.info("        Final content: %d chars", len(content))
 
             return PageContentSyncResult(
@@ -474,7 +475,6 @@ class SyncService:
                 title=page.title,
                 onenote_id=page.onenote_id,
                 content=content,
-                content_hash=_compute_hash(content),
                 sync_status=PageSyncStatus.FRESH,
             )
         except Exception as error:
@@ -490,26 +490,69 @@ class SyncService:
     async def _fetch_page_images(
         self, image_elements: list[GraphPageElement], access_token: str
     ) -> dict[str, bytes]:
+        # Sequential on purpose: one image $value request at a time. The Graph semaphore +
+        # rate limiter already gate throughput, and most pages have few loose images now that
+        # PDF printouts are fetched once as a source file. A failed image is logged and skipped
+        # so it doesn't fail the whole page. Parallelize here only if a page's image count is
+        # shown to make this the bottleneck.
         image_bytes_map: dict[str, bytes] = {}
-        urls = [element.image_url for element in image_elements if element.image_url]
-        if not urls:
-            return image_bytes_map
-
-        results = await asyncio.gather(
-            *[self._graph_client.get_page_image(access_token, url) for url in urls],
-            return_exceptions=True,
-        )
-        for url, result in zip(urls, results):
-            if isinstance(result, Exception):
-                logger.warning("        Failed to fetch image: %s", result)
-            else:
-                image_bytes_map[url] = result
+        for element in image_elements:
+            url = element.image_url
+            if not url:
+                continue
+            try:
+                image_bytes_map[url] = await self._graph_client.get_page_image(access_token, url)
+            except Exception as error:
+                logger.warning("        Failed to fetch image: %s", error)
         return image_bytes_map
 
+    async def _extract_pdf_attachments(
+        self, pdf_elements: list[GraphPageElement], access_token: str
+    ) -> list[str]:
+        """Fetch each PDF printout's source file **once** and extract its text locally.
+
+        One Graph `$value` request per PDF (vs one per rasterized page today). PyMuPDF text +
+        per-page render run in a worker thread (`fitz.Document` is not thread-safe); the figure
+        pages it flags are OCR'd sequentially here — the Vision quota is separate from the Graph
+        budget. See plans/attachment-fetch-optimization.md (and its "Future optimizations" note on
+        fanning the OCR out if per-page latency becomes the bottleneck)."""
+        pdf_texts: list[str] = []
+        for pdf_element in pdf_elements:
+            name = pdf_element.attachment_name or "?"
+            pdf_bytes = await self._graph_client.get_page_image(access_token, pdf_element.resource_url)
+            logger.info("        PDF '%s': fetched %d bytes", name, len(pdf_bytes))
+
+            extraction = await asyncio.to_thread(
+                extract_pdf,
+                pdf_bytes,
+                render_dpi=settings.SYNC_PDF_RENDER_DPI,
+                text_threshold=settings.SYNC_PDF_OCR_TEXT_THRESHOLD,
+            )
+
+            ocr_by_index: dict[int, str] = {}
+            if self._ocr_client is not None:
+                for index, png_bytes in extraction.renders_to_ocr:
+                    ocr_by_index[index] = await self._ocr_client.run_ocr_async(png_bytes)
+            elif extraction.renders_to_ocr:
+                logger.info(
+                    "        PDF '%s': %d page(s) need OCR but OCR client not loaded — text only",
+                    name, len(extraction.renders_to_ocr),
+                )
+
+            merged = merge_pdf_text(extraction.page_texts, ocr_by_index)
+            logger.info(
+                "        PDF '%s': %d page(s), %d OCR'd, %d chars",
+                name, len(extraction.page_texts), len(ocr_by_index), len(merged),
+            )
+            if merged.strip():
+                pdf_texts.append(merged)
+        return pdf_texts
+
     def _assemble_page_content(
-        self, text_elements: list[GraphPageElement], ocr_text: str
+        self, text_elements: list[GraphPageElement], ocr_text: str, pdf_texts: list[str]
     ) -> str:
         text_parts = [element.text for element in text_elements if element.text]
+        text_parts.extend(pdf_texts)
         if ocr_text:
             text_parts.append(ocr_text)
         return "\n\n".join(text_parts)
@@ -520,7 +563,6 @@ class SyncService:
                 result.page_id,
                 PageUpdate(
                     content=result.content,
-                    content_hash=result.content_hash,
                     sync_status=PageSyncStatus.FRESH,
                 ),
             )

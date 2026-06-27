@@ -71,8 +71,7 @@ class PageResponse(BaseModel):
     onenote_id: str
     title: Optional[str] = None
     content: Optional[str] = None
-    content_hash: Optional[str] = None
-    sync_status: PageSyncStatus 
+    sync_status: PageSyncStatus
 
 
 class PageSearchResponse(BaseModel):
@@ -229,7 +228,6 @@ class NotebookUpdate(BaseModel):
 class PageUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
-    content_hash: Optional[str] = None
     sync_status: Optional[PageSyncStatus] = None
 
 
@@ -303,7 +301,6 @@ class PageDetailResponse(BaseModel):
     onenote_id: str
     page_title: Optional[str] = None
     content: Optional[str] = None
-    content_hash: Optional[str] = None
     page_sync_status: Optional[PageSyncStatus] = None
     section_name: str
     notebook_id: int
@@ -395,7 +392,7 @@ class GraphPage(BaseModel):
 
 
 class GraphPageElement(BaseModel):
-    kind: Literal["text", "image"]
+    kind: Literal["text", "image", "pdf_attachment"]
     text: str | None = None
     image_url: str | None = None
     # CSS absolute position — only meaningful for kind="image", used for composite rendering
@@ -403,6 +400,9 @@ class GraphPageElement(BaseModel):
     left: float = 0.0
     width: float = 0.0
     height: float = 0.0
+    # kind="pdf_attachment" only: a OneNote "file printout" keeps the source PDF as one resource.
+    attachment_name: str | None = None
+    resource_url: str | None = None
 
 
 class GraphPageContent(BaseModel):
@@ -434,7 +434,6 @@ class PageContentSyncResult(BaseModel):
     title: str | None = None
     onenote_id: str
     content: str | None = None
-    content_hash: str | None = None
     sync_status: PageSyncStatus = PageSyncStatus.FRESH
     error_message: str | None = None
 

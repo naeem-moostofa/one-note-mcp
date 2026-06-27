@@ -89,7 +89,6 @@ async def main():
                     "onenote_id": f"synthetic-{next_idx}",
                     "title": f"Synthetic page {next_idx}",
                     "content": content,
-                    "content_hash": f"hash-synthetic-{next_idx}",
                 })
                 next_idx += 1
             await session.execute(Page.__table__.insert(), rows)

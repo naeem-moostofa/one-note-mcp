@@ -119,7 +119,6 @@ class Page(Base):
     title = Column(String, nullable=True)
     content = Column(Text, nullable=True)
     search_vector = Column(TSVECTOR, Computed("to_tsvector('english', coalesce(content, ''))", persisted=True))
-    content_hash = Column(String, nullable=True)
     sync_status = Column(
         SAEnum(PageSyncStatus, name="page_sync_status"),
         nullable=False,

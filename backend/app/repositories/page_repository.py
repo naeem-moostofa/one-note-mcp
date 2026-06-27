@@ -46,7 +46,6 @@ class PageRepository:
                 Page.onenote_id,
                 Page.title.label("page_title"),
                 Page.content,
-                Page.content_hash,
                 Page.sync_status.label("page_sync_status"),
                 Section.display_name.label("section_name"),
                 Notebook.id.label("notebook_id"),

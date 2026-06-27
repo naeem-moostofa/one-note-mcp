@@ -134,21 +134,18 @@ async def seed():
             onenote_id="cs246-lec8",
             title="Lecture 8 - Operator Overloading",
             content=CS246_CONTENT,
-            content_hash="hash-cs246-lec8",
         )
         nets_page = Page(
             section_id=nets_section.id,
             onenote_id="cs456-lec2",
             title="Lecture 2 - Protocols",
             content=NETWORKS_CONTENT,
-            content_hash="hash-cs456-lec2",
         )
         personal_page = Page(
             section_id=personal_section.id,
             onenote_id="personal-journal-1",
             title="Hiking",
             content=UNRELATED_CONTENT,
-            content_hash="hash-journal-1",
         )
         session.add_all([cs_page, nets_page, personal_page])
         await session.flush()
