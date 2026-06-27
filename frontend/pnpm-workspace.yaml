@@ -6,15 +6,20 @@ minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   - "@types/*"   # type stubs are low-risk; fast-track them (and urgent security fixes go here too)
 
-# Native bindings (Vite 8's rolldown bundler, lightningcss) ship as per-CPU
-# optional deps. This is a Windows-on-ARM machine, but the standalone pnpm.exe runs
-# under x64 emulation and otherwise mis-detects the CPU as x64 — so it would install
-# only the x64 binding and the arm64 Node runtime can't load it. Listing the targets
-# explicitly (additive to auto-detection) forces the correct bindings to install,
-# and keeps the project portable across machines/CI.
+# Native bindings (Vite 8's rolldown bundler, lightningcss) ship as per-platform
+# optional deps. This repo is developed on Windows but deployed on Linux, so list
+# both targets explicitly. `current` keeps installs correct on whichever machine
+# is running pnpm; the concrete Windows/Linux entries keep local dev and Vercel
+# builds from pruning each other's native bindings.
 supportedArchitectures:
   os:
+    - current
     - win32
+    - linux
   cpu:
+    - current
     - arm64
     - x64
+  libc:
+    - current
+    - glibc
