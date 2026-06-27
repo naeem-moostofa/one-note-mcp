@@ -62,18 +62,23 @@ async def _download_pdf(notebook_filter: str, attachment_filter: str, dest: Path
             except Exception as error:
                 logger.warning("Skipping connection %s (%s)", connection.id, error)
                 continue
-            for notebook in await graph.get_notebooks(token):
+            connection_key = connection.id
+            for notebook in await graph.get_notebooks(token, connection_key=connection_key):
                 if notebook_filter.lower() not in notebook.display_name.lower():
                     continue
-                for section in await graph.get_sections(token, notebook.id):
-                    for page in await graph.get_pages(token, section.id):
-                        html = await graph.get_page_content(token, page.id)
+                for section in await graph.get_sections(token, notebook.id, connection_key=connection_key):
+                    for page in await graph.get_pages(token, section.id, connection_key=connection_key):
+                        html = await graph.get_page_content(token, page.id, connection_key=connection_key)
                         for obj in BeautifulSoup(html, "html.parser").find_all("object"):
                             name = obj.get("data-attachment") or ""
                             if (obj.get("type") or "").lower() == "application/pdf" \
                                     and attachment_filter.lower() in name.lower() and obj.get("data"):
                                 logger.info("Found '%s' on page '%s' — downloading once...", name, getattr(page, "title", page.id))
-                                pdf_bytes = await graph.get_page_image(token, obj["data"])
+                                pdf_bytes = await graph.get_page_image(
+                                    token,
+                                    obj["data"],
+                                    connection_key=connection_key,
+                                )
                                 dest.write_bytes(pdf_bytes)
                                 logger.info("Saved %d bytes to %s", len(pdf_bytes), dest)
                                 return name

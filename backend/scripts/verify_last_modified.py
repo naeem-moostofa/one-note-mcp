@@ -27,7 +27,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from app.clients.graph_client import GraphClient
+from app.clients.graph_client import GraphClient, GraphConnectionKey
 from app.clients.msal_client import get_msal_client
 from app.clients.ocr_client import get_ocr_client
 from app.core.database import AsyncSessionLocal, engine
@@ -56,18 +56,33 @@ def _close(left: datetime | None, right: datetime | None) -> bool:
     return abs(left - right) < timedelta(seconds=1)
 
 
-async def _pick_notebook(service: SyncService, access_token: str, small_threshold: int):
+async def _pick_notebook(
+    service: SyncService,
+    access_token: str,
+    connection_key: GraphConnectionKey,
+    small_threshold: int,
+):
     """Scan Graph (metadata only) and return (graph_notebook, page_count, max_page_modified)
     for the smallest non-empty notebook. Stops early at the first <= small_threshold."""
-    graph_notebooks = await service._graph_client.get_notebooks(access_token)
+    graph_notebooks = await service._graph_client.get_notebooks(access_token, connection_key=connection_key)
     log.info("Scanning %d notebooks for the smallest non-empty one…", len(graph_notebooks))
 
     best = None  # (graph_notebook, count, max_modified)
     for graph_notebook in graph_notebooks:
-        sections = await service._graph_client.get_sections(access_token, graph_notebook.id)
+        sections = await service._graph_client.get_sections(
+            access_token,
+            graph_notebook.id,
+            connection_key=connection_key,
+        )
         pages = []
         for section in sections:
-            pages.extend(await service._graph_client.get_pages(access_token, section.id))
+            pages.extend(
+                await service._graph_client.get_pages(
+                    access_token,
+                    section.id,
+                    connection_key=connection_key,
+                )
+            )
         count = len(pages)
         if count == 0:
             continue
@@ -100,6 +115,7 @@ async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: 
             _assert(len(connections) >= 1, f"found an active Microsoft connection (got {len(connections)})")
             connection = connections[0]
             user_id = connection.user_id
+            connection_key = connection.id
 
             access_token = await service._acquire_token(connection)
             _assert(access_token is not None, "acquired a Graph access token (account still connected)")
@@ -116,17 +132,35 @@ async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: 
             if notebook_id_override is not None:
                 chosen_db = next((nb for nb in db_notebooks if nb.id == notebook_id_override), None)
                 _assert(chosen_db is not None, f"--notebook-id {notebook_id_override} belongs to the connected user")
-                graph_notebooks = await service._graph_client.get_notebooks(access_token)
+                graph_notebooks = await service._graph_client.get_notebooks(
+                    access_token,
+                    connection_key=connection_key,
+                )
                 graph_notebook = next((gn for gn in graph_notebooks if gn.id == chosen_db.onenote_id), None)
                 _assert(graph_notebook is not None, "the chosen notebook still exists in Graph")
-                sections = await service._graph_client.get_sections(access_token, graph_notebook.id)
+                sections = await service._graph_client.get_sections(
+                    access_token,
+                    graph_notebook.id,
+                    connection_key=connection_key,
+                )
                 pages = []
                 for section in sections:
-                    pages.extend(await service._graph_client.get_pages(access_token, section.id))
+                    pages.extend(
+                        await service._graph_client.get_pages(
+                            access_token,
+                            section.id,
+                            connection_key=connection_key,
+                        )
+                    )
                 _assert(len(pages) >= 1, f"chosen notebook has pages to sync (got {len(pages)})")
                 expected_max = max(page.last_modified_datetime for page in pages)
             else:
-                graph_notebook, _count, expected_max = await _pick_notebook(service, access_token, small_threshold)
+                graph_notebook, _count, expected_max = await _pick_notebook(
+                    service,
+                    access_token,
+                    connection_key,
+                    small_threshold,
+                )
                 chosen_db = next((nb for nb in db_notebooks if nb.onenote_id == graph_notebook.id), None)
                 _assert(chosen_db is not None, "picked notebook is present in the DB after refresh")
 

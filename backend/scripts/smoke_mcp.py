@@ -71,14 +71,12 @@ async def _seed():
             onenote_id="pg-1",
             title="Pointers",
             content="A pointer holds the address of another variable. Pointer arithmetic in C lets you traverse arrays.",
-            content_hash="h1",
         )
         memory_page = Page(
             section_id=lecture_section.id,
             onenote_id="pg-2",
             title="Memory",
             content="Stack vs heap allocation; manual free() is required for malloc'd buffers.",
-            content_hash="h2",
             sync_status=PageSyncStatus.SYNCING,  # exercises the stale path
         )
         grocery_page = Page(
@@ -86,7 +84,6 @@ async def _seed():
             onenote_id="pg-3",
             title="Grocery list",
             content="Apples, oranges, bread, butter.",
-            content_hash="h3",
         )
         session.add_all([pointers_page, memory_page, grocery_page])
         # Notebook B is mid-sync — every hit/page in it should be `stale: True`.

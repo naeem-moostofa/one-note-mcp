@@ -10,7 +10,7 @@ from collections import deque
 from typing import TypeAlias, TypeVar
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from fastapi import Request
 from PIL import Image, ImageDraw
 from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_random_exponential
@@ -23,9 +23,13 @@ _BASE_URL = "https://graph.microsoft.com/v1.0"
 # Beta uses the same /me/onenote/ path as v1.0, just against the beta base URL
 _BETA_URL = "https://graph.microsoft.com/beta"
 _INK_NODE_COMMENT = "<!-- InkNode is not supported -->"
-# Bumped from 5: with the rate limiter in place a request rarely needs this many, but it
-# lets a page survive one throttling window instead of failing and amplifying the next run.
-_MAX_RETRIES = 8
+# A throttle attempt now spends its wait inside the rate-limiter gate (acquire / wait_out_cooldown),
+# which does NOT consume a tenacity attempt — so an attempt is burned only by a genuine probe-429
+# (cooldown expired but OneNote still throttling). At the 60s cooldown cap that means ~15 probes can
+# ride out roughly 15 minutes of sustained server-side throttle before a call gives up; anything
+# longer falls through to the job-level retry (backoff up to 15 min × max_attempts). Cheap insurance
+# since waiting is free here — the goal is completion, not speed.
+_MAX_RETRIES = 15
 _INKML_NS = "http://www.w3.org/2003/InkML"
 # 1 HiMetric = 0.01 mm; at 96 DPI: px = himetric * 96 / 2540.
 _HIMETRIC_TO_PX_BASE = 96.0 / 2540.0
@@ -41,13 +45,14 @@ _M = TypeVar("_M")
 
 InkPoint: TypeAlias = tuple[float, float]
 InkStroke: TypeAlias = list[InkPoint]
+GraphConnectionKey: TypeAlias = int
 
 logger = logging.getLogger(__name__)
 
 
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
-# 429 (throttled) and 503 (overloaded) additionally trip an account-wide cooldown that pauses
-# every in-flight + future request, not just the one that failed.
+# 429 (throttled) and 503 (overloaded) additionally trip a connection-wide cooldown that
+# pauses every in-flight + future request for that Microsoft account, not just the one that failed.
 _THROTTLE_STATUS_CODES = {429, 503}
 
 # Adaptive cooldown. OneNote sends no Retry-After, so on a throttle we compute our own pause
@@ -59,24 +64,17 @@ _COOLDOWN_MAX_LEVEL = 8
 _RETRY_AFTER_CAP_S = 120.0
 _THROTTLE_DECAY_S = 120.0
 
-# OneNote/Graph allows 5 concurrent requests per app per user. With a single Microsoft
-# account this is process-wide, so a module-level semaphore (shared by every GraphClient
-# instance) is the right scope. It binds to the event loop on first acquire, not at import,
-# so it is safe as long as each process runs one loop. When multiple Microsoft accounts are
-# supported, switch to a per-connection keyed semaphore.
-_graph_semaphore = asyncio.Semaphore(settings.SYNC_GRAPH_CONCURRENCY)
-
-
 class _GraphRateLimiter:
-    """Process-wide sliding-window rate limiter + adaptive throttle cooldown for OneNote/Graph.
+    """Per-connection sliding-window rate limiter + adaptive throttle cooldown for OneNote/Graph.
 
     Honors both documented OneNote limits at once (per-minute and per-hour) by keeping a log
-    of recent request timestamps and counting each window. A 429/503 sets a shared
+    of recent request timestamps and counting each window. A 429/503 sets a connection-local
     ``_paused_until`` deadline that every request observes in ``acquire()``, so one throttle
-    backs off the whole executor rather than just the failing request. State is in-process, so
-    it is correct only while a single process makes Graph calls (see the rate-limit plan's
-    deployment notes). The window/cooldown math lives in pure, lock-held helpers (``_reserve``,
-    ``_apply_throttle``) so it can be unit-tested with an injected clock and no real sleeping.
+    backs off that Microsoft account rather than just the failing request. State is in-process,
+    so it is correct only while a single process makes Graph calls for a given connection (see
+    the rate-limit plan's deployment notes). The window/cooldown math lives in pure, lock-held
+    helpers (``_reserve``, ``_apply_throttle``) so it can be unit-tested with an injected clock
+    and no real sleeping.
     """
 
     def __init__(self, per_minute: int, per_hour: int, clock=time.monotonic) -> None:
@@ -88,6 +86,11 @@ class _GraphRateLimiter:
         self._throttle_level = 0
         self._last_throttle_at = 0.0
         self._lock = asyncio.Lock()
+        # Minimum gap between two releases. During a cooldown the rolling minute window drains
+        # to empty (no requests are recorded while paused), so without this every waiter would
+        # clear the window check at once on reopen and stampede the still-throttled service.
+        # Spacing releases at the per-minute rate turns that stampede into a ramp.
+        self._min_spacing = 60.0 / per_minute if per_minute > 0 else 0.0
 
     def _reserve(self, now: float) -> float | None:
         """Decide whether a request may go now. Caller must hold ``self._lock``.
@@ -104,6 +107,14 @@ class _GraphRateLimiter:
         hour_cutoff = now - 3600
         while self._request_times and self._request_times[0] <= hour_cutoff:
             self._request_times.popleft()
+
+        # Pace releases so a window emptied during a cooldown can't reopen as a burst. The most
+        # recent timestamp is the deque tail (eviction only trims the head), so the next request
+        # waits until one spacing interval after it.
+        if self._request_times:
+            earliest_next = self._request_times[-1] + self._min_spacing
+            if now < earliest_next:
+                return earliest_next - now
 
         minute_cutoff = now - 60
         count_minute = sum(1 for timestamp in self._request_times if timestamp > minute_cutoff)
@@ -130,8 +141,24 @@ class _GraphRateLimiter:
                     return
             await asyncio.sleep(max(wait, 0.0))
 
+    async def wait_out_cooldown(self) -> None:
+        """Block while a connection cooldown is active — re-checking *only* the pause, not the window.
+
+        A request that already cleared ``acquire()`` can sit queued on the concurrency semaphore
+        for seconds while earlier requests drain. If one of those 429s and arms the cooldown in
+        that gap, this request would otherwise still hit the wire (acquire only gates on entry).
+        Calling this right before the HTTP call closes that gap so a throttle stops the requests
+        already past the gate, not just the next acquire() wave."""
+        while True:
+            async with self._lock:
+                now = self._clock()
+                if now >= self._paused_until:
+                    return
+                wait = self._paused_until - now
+            await asyncio.sleep(max(wait, 0.0))
+
     def _apply_throttle(self, now: float, retry_after: float) -> None:
-        """Escalate the shared cooldown after a throttle. Caller must hold ``self._lock``."""
+        """Escalate the connection cooldown after a throttle. Caller must hold ``self._lock``."""
         self._throttle_level = min(self._throttle_level + 1, _COOLDOWN_MAX_LEVEL)
         cooldown = min(_COOLDOWN_CAP_S, _COOLDOWN_BASE_S * 2 ** (self._throttle_level - 1))
         cooldown += random.uniform(0, _COOLDOWN_JITTER_S)
@@ -148,8 +175,88 @@ class _GraphRateLimiter:
             self._apply_throttle(self._clock(), retry_after)
 
 
-_rate_limiter = _GraphRateLimiter(
-    settings.SYNC_GRAPH_RATE_PER_MINUTE, settings.SYNC_GRAPH_RATE_PER_HOUR
+class _GraphBudget:
+    """One Microsoft connection's private rate window, cooldown, and concurrency cap."""
+
+    def __init__(
+        self,
+        per_minute: int,
+        per_hour: int,
+        concurrency: int,
+        clock=time.monotonic,
+    ) -> None:
+        self.limiter = _GraphRateLimiter(per_minute, per_hour, clock)
+        self.semaphore = asyncio.Semaphore(concurrency)
+        self.last_used = clock()
+        self.active_requests = 0
+
+
+class _GraphBudgetRegistry:
+    """Lazy per-connection budget registry with amortized idle eviction."""
+
+    def __init__(
+        self,
+        per_minute: int,
+        per_hour: int,
+        concurrency: int,
+        *,
+        idle_evict_s: float,
+        evict_interval_s: float,
+        clock=time.monotonic,
+    ) -> None:
+        self._per_minute = per_minute
+        self._per_hour = per_hour
+        self._concurrency = concurrency
+        self._idle_evict_s = idle_evict_s
+        self._evict_interval_s = evict_interval_s
+        self._clock = clock
+        self._budgets: dict[GraphConnectionKey, _GraphBudget] = {}
+        self._lock = asyncio.Lock()
+        self._last_evicted = clock()
+
+    async def get(self, key: GraphConnectionKey) -> _GraphBudget:
+        async with self._lock:
+            now = self._clock()
+            if now - self._last_evicted > self._evict_interval_s:
+                self._evict_idle(now)
+                self._last_evicted = now
+
+            budget = self._budgets.get(key)
+            if budget is None:
+                budget = _GraphBudget(
+                    self._per_minute,
+                    self._per_hour,
+                    self._concurrency,
+                    self._clock,
+                )
+                self._budgets[key] = budget
+            budget.last_used = now
+            budget.active_requests += 1
+            return budget
+
+    async def release(self, key: GraphConnectionKey, budget: _GraphBudget) -> None:
+        async with self._lock:
+            current = self._budgets.get(key)
+            if current is not budget:
+                return
+            budget.active_requests = max(0, budget.active_requests - 1)
+            budget.last_used = self._clock()
+
+    def _evict_idle(self, now: float) -> None:
+        expired_keys = [
+            key for key, budget in self._budgets.items()
+            if budget.active_requests == 0 and now - budget.last_used > self._idle_evict_s
+        ]
+        for key in expired_keys:
+            del self._budgets[key]
+
+
+_budget_registry = _GraphBudgetRegistry(
+    settings.SYNC_GRAPH_RATE_PER_MINUTE,
+    settings.SYNC_GRAPH_RATE_PER_HOUR,
+    settings.SYNC_GRAPH_CONCURRENCY,
+    idle_evict_s=settings.SYNC_GRAPH_BUDGET_IDLE_EVICT_S,
+    evict_interval_s=settings.SYNC_GRAPH_BUDGET_EVICT_INTERVAL_S,
 )
 
 
@@ -171,6 +278,27 @@ def _parse_retry_after(response: httpx.Response) -> float:
         return min(float(value), _RETRY_AFTER_CAP_S)
     except ValueError:
         return 0.0  # HTTP-date form unsupported; fall back to the computed backoff
+
+
+def _split_content_multipart(content_type: str, content: bytes) -> tuple[str | None, str | None]:
+    """Parse beta page content into (html, inkml_xml), either of which may be absent."""
+    raw = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + content
+    message = email.message_from_bytes(raw)
+
+    html = None
+    inkml = None
+    for part in message.walk():
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes):
+            continue
+
+        part_content_type = part.get_content_type()
+        if part_content_type in ("text/html", "application/xhtml+xml"):
+            html = payload.decode("utf-8", errors="replace")
+        elif part_content_type == "application/inkml+xml":
+            inkml = payload.decode("utf-8", errors="replace")
+
+    return html, inkml
 
 
 def _raise_graph_api_error(retry_state) -> None:
@@ -200,7 +328,7 @@ _exponential_wait = wait_random_exponential(multiplier=1, max=60)
 
 
 def _retry_wait(retry_state: RetryCallState) -> float:
-    """Tenacity wait. Throttle codes wait ~0 here because the account-wide cooldown is applied
+    """Tenacity wait. Throttle codes wait ~0 here because the connection cooldown is applied
     at the rate limiter's ``acquire()`` gate (avoids double-sleeping the failing request);
     other retryable errors (502/504, transport timeouts) get per-request exponential backoff."""
     error = retry_state.outcome.exception() if retry_state.outcome else None
@@ -214,45 +342,95 @@ def _parse_css_px(style: str, prop: str) -> float:
     return float(match.group(1)) if match else 0.0
 
 
+def _attr_str(tag: Tag, name: str) -> str | None:
+    """A single attribute value as a string, or None if absent.
+
+    BeautifulSoup returns a list for multi-valued HTML attributes (e.g. ``class``). OneNote's
+    attributes here are single-valued, but coerce defensively so callers always get a plain str."""
+    value = tag.get(name)
+    if isinstance(value, list):
+        return " ".join(value)
+    return value
+
+
+def _parse_pdf_attachments(body: Tag) -> list[GraphPageElement]:
+    """One ``pdf_attachment`` element per ``<object type="application/pdf">`` carrying a data URL.
+
+    These objects are not necessarily positioned body children, so they're found across the whole
+    body. Order relative to the positioned text/images does not matter — the sync service handles
+    pdf_attachment elements separately from the composite/reading-order elements."""
+    elements: list[GraphPageElement] = []
+    for obj in body.find_all("object"):
+        if not isinstance(obj, Tag):
+            continue
+        if (_attr_str(obj, "type") or "").lower() != "application/pdf":
+            continue
+        resource_url = _attr_str(obj, "data")
+        if not resource_url:
+            continue
+        elements.append(GraphPageElement(
+            kind="pdf_attachment",
+            attachment_name=_attr_str(obj, "data-attachment"),
+            resource_url=resource_url,
+        ))
+    return elements
+
+
+def _parse_positioned_element(child: Tag, style: str) -> GraphPageElement | None:
+    """Map one absolutely-positioned body child to a text/image element, or None to skip it."""
+    img = child if child.name == "img" else child.find("img")
+    if isinstance(img, Tag) and _attr_str(img, "data-fullres-src"):
+        # Skip rasterized PDF-page images — they belong to a pdf_attachment we fetch once.
+        if _attr_str(img, "data-options") == "printout":
+            return None
+        return GraphPageElement(
+            kind="image",
+            image_url=_attr_str(img, "data-fullres-src"),
+            top=_parse_css_px(style, "top"),
+            left=_parse_css_px(style, "left"),
+            width=_parse_css_px(style, "width"),
+            height=_parse_css_px(style, "height"),
+        )
+
+    if _INK_NODE_COMMENT in str(child):
+        return None  # ink handled separately via InkML
+
+    text = child.get_text(separator="\n", strip=True)
+    if text:
+        return GraphPageElement(kind="text", text=text)
+    return None
+
+
 def _parse_page_elements(html: str) -> list[GraphPageElement]:
-    """Parse OneNote HTML body elements in visual reading order (sorted by CSS top/left)."""
+    """Parse OneNote HTML body elements in visual reading order (sorted by CSS top/left).
+
+    PDF "file printouts" are handled specially: OneNote keeps the source PDF as a single
+    ``<object type="application/pdf">`` attachment *and* rasterizes every PDF page into its own
+    ``<img data-options="printout">``. We emit one ``pdf_attachment`` element per object (fetched
+    once, text pulled locally) and **skip** the per-page printout images that would otherwise cost
+    one Graph ``$value`` request each. Genuinely loose images (no ``data-options="printout"``) are
+    still emitted as ``image`` and fetched individually. See
+    plans/attachment-fetch-optimization.md."""
     soup = BeautifulSoup(html, "html.parser")
     body = soup.find("body")
-    if not body:
+    if not isinstance(body, Tag):
         return []
 
-    positioned: list[tuple[float, float, GraphPageElement]] = []
+    pdf_elements = _parse_pdf_attachments(body)
 
+    positioned: list[tuple[float, float, GraphPageElement]] = []
     for child in body.children:
-        if not hasattr(child, "get"):
+        if not isinstance(child, Tag):
             continue
-        style = child.get("style", "").replace(" ", "")
+        style = (_attr_str(child, "style") or "").replace(" ", "")
         if "position:absolute" not in style:
             continue
-
-        top = _parse_css_px(style, "top")
-        left = _parse_css_px(style, "left")
-
-        img = child.find("img") if child.name != "img" else child
-        if img and img.get("data-fullres-src"):
-            width = _parse_css_px(style, "width")
-            height = _parse_css_px(style, "height")
-            positioned.append((top, left, GraphPageElement(
-                kind="image",
-                image_url=img["data-fullres-src"],
-                top=top, left=left, width=width, height=height,
-            )))
-            continue
-
-        if _INK_NODE_COMMENT in str(child):
-            continue  # ink handled separately via InkML
-
-        text = child.get_text(separator="\n", strip=True)
-        if text:
-            positioned.append((top, left, GraphPageElement(kind="text", text=text)))
+        element = _parse_positioned_element(child, style)
+        if element is not None:
+            positioned.append((_parse_css_px(style, "top"), _parse_css_px(style, "left"), element))
 
     positioned.sort(key=lambda positioned_element: (positioned_element[0], positioned_element[1]))
-    return [element for _, _, element in positioned]
+    return pdf_elements + [element for _, _, element in positioned]
 
 
 def _parse_inkml_strokes(inkml_xml: str) -> list[InkStroke]:
@@ -365,8 +543,8 @@ def composite_page(
 
 class GraphClient:
     def __init__(self, *, timeout: float = 30.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        # GraphClient owns its transport. Pool sized above the Graph semaphore so the
-        # semaphore is the binding concurrency cap, not httpx's pool. Tests inject a
+        # GraphClient owns its transport. Pool sized above one connection's concurrency cap
+        # so the per-connection cap is binding for today's serial worker. Tests inject a
         # transport (e.g. httpx.MockTransport) to avoid real network calls.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -393,99 +571,170 @@ class GraphClient:
         before_sleep=_log_graph_retry,
         retry_error_callback=_raise_graph_api_error,
     )
-    async def _get(self, url: str, access_token: str) -> httpx.Response:
+    async def _get(
+        self,
+        url: str,
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> httpx.Response:
         # Pace against the OneNote rate limits and honor any active throttle cooldown BEFORE
         # taking a concurrency slot, so a backoff/cooldown wait releases the slot rather than
         # holding one of the 5 the whole time.
-        await _rate_limiter.acquire()
-        async with _graph_semaphore:
-            response = await self._client.get(url, headers=self._headers(access_token))
-        # A throttle/overload response pauses the whole executor — record it before raising so
-        # tenacity retries and every worker observes the cooldown at its next acquire().
-        if response.status_code in _THROTTLE_STATUS_CODES:
-            await _rate_limiter.register_throttle(_parse_retry_after(response))
-        response.raise_for_status()
-        return response
+        budget = await _budget_registry.get(connection_key)
+        try:
+            await budget.limiter.acquire()
+            async with budget.semaphore:
+                # Re-check the cooldown after taking a concurrency slot: a sibling request may have
+                # 429'd and armed the pause while we waited here, and acquire() only gates on entry.
+                await budget.limiter.wait_out_cooldown()
+                response = await self._client.get(url, headers=self._headers(access_token))
+            # A throttle/overload response pauses this connection's budget before raising so
+            # tenacity retries and sibling requests for the same account observe the cooldown.
+            if response.status_code in _THROTTLE_STATUS_CODES:
+                await budget.limiter.register_throttle(_parse_retry_after(response))
+            response.raise_for_status()
+            return response
+        finally:
+            await _budget_registry.release(connection_key, budget)
 
-    async def _get_all(self, url: str, access_token: str, model: type[_M]) -> list[_M]:
+    async def _get_all(
+        self,
+        url: str,
+        access_token: str,
+        model: type[_M],
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> list[_M]:
         items: list[_M] = []
         next_url: str | None = url
         while next_url:
-            response = await self._get(next_url, access_token)
+            response = await self._get(next_url, access_token, connection_key=connection_key)
             data = response.json()
             for item in data.get("value", []):
                 items.append(model.model_validate(item))  # type: ignore[attr-defined]
             next_url = data.get("@odata.nextLink")
         return items
 
-    async def _get_inkml(self, access_token: str, page_id: str) -> str | None:
-        """Fetch InkML XML via the beta endpoint. Returns None on any failure.
+    async def _get_content_with_inkml(
+        self,
+        access_token: str,
+        page_id: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> tuple[str, str | None]:
+        """Fetch page HTML and InkML in one beta call.
 
-        Same /me/onenote/ path as v1.0 but against the beta base URL.
-        Response is multipart/form-data; Part 2 is application/inkml+xml.
+        Raises on HTTP failure so the caller can fall back to the v1.0 HTML endpoint.
         """
-        try:
-            url = f"{_BETA_URL}/me/onenote/pages/{page_id}/content?includeInkML=true"
-            response = await self._get(url, access_token)
-            content_type = response.headers.get("content-type", "")
-            raw_multipart_response = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + response.content
-            message = email.message_from_bytes(raw_multipart_response)
-            for part in message.walk():
-                if part.get_content_type() == "application/inkml+xml":
-                    payload = part.get_payload(decode=True)
-                    if isinstance(payload, bytes):
-                        return payload.decode("utf-8", errors="replace")
-            return None
-        except httpx.HTTPStatusError as error:
-            logger.warning(
-                "Failed to fetch InkML for page %s: %s — response body: %s",
-                page_id, error, error.response.text,
-            )
-            return None
-        except Exception as error:
-            logger.warning("Failed to fetch InkML for page %s: %s", page_id, error)
-            return None
+        url = f"{_BETA_URL}/me/onenote/pages/{page_id}/content?includeInkML=true"
+        response = await self._get(url, access_token, connection_key=connection_key)
+        content_type = response.headers.get("content-type", "")
+        html, inkml_xml = _split_content_multipart(content_type, response.content)
+        if html is None:
+            if "multipart/" in content_type.lower():
+                raise GraphAPIError("Beta page content response did not include an HTML part")
+            html = response.text
+        return html, inkml_xml
 
-    async def get_notebooks(self, access_token: str) -> list[GraphNotebook]:
-        return await self._get_all(f"{_BASE_URL}/me/onenote/notebooks?$top=100", access_token, GraphNotebook)
-
-    async def get_sections(self, access_token: str, notebook_id: str) -> list[GraphSection]:
+    async def get_notebooks(
+        self,
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> list[GraphNotebook]:
         return await self._get_all(
-            f"{_BASE_URL}/me/onenote/notebooks/{notebook_id}/sections?$top=100", access_token, GraphSection
+            f"{_BASE_URL}/me/onenote/notebooks?$top=100",
+            access_token,
+            GraphNotebook,
+            connection_key=connection_key,
         )
 
-    async def get_pages(self, access_token: str, section_id: str) -> list[GraphPage]:
+    async def get_sections(
+        self,
+        access_token: str,
+        notebook_id: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> list[GraphSection]:
         return await self._get_all(
-            f"{_BASE_URL}/me/onenote/sections/{section_id}/pages?$top=100", access_token, GraphPage
+            f"{_BASE_URL}/me/onenote/notebooks/{notebook_id}/sections?$top=100",
+            access_token,
+            GraphSection,
+            connection_key=connection_key,
         )
 
-    async def get_page_content(self, access_token: str, page_id: str) -> str:
-        response = await self._get(f"{_BASE_URL}/me/onenote/pages/{page_id}/content", access_token)
+    async def get_pages(
+        self,
+        access_token: str,
+        section_id: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> list[GraphPage]:
+        return await self._get_all(
+            f"{_BASE_URL}/me/onenote/sections/{section_id}/pages?$top=100",
+            access_token,
+            GraphPage,
+            connection_key=connection_key,
+        )
+
+    async def get_page_content(
+        self,
+        access_token: str,
+        page_id: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> str:
+        response = await self._get(
+            f"{_BASE_URL}/me/onenote/pages/{page_id}/content",
+            access_token,
+            connection_key=connection_key,
+        )
         return response.text
 
-    async def get_page_image(self, access_token: str, resource_url: str) -> bytes:
+    async def get_page_image(
+        self,
+        access_token: str,
+        resource_url: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> bytes:
         """Fetch image bytes from a Graph resource URL extracted from page HTML."""
-        response = await self._get(resource_url, access_token)
+        response = await self._get(resource_url, access_token, connection_key=connection_key)
         return response.content
 
-    async def get_page_content_with_ink(self, access_token: str, page_id: str) -> GraphPageContent:
+    async def get_page_content_with_ink(
+        self,
+        access_token: str,
+        page_id: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> GraphPageContent:
         """Fetch page content and parse elements in visual reading order (CSS top/left sorted).
 
-        Makes 1 API call for typed pages, 2 for pages with ink (v1.0 HTML + beta InkML).
+        Makes 1 beta API call per page because the multipart beta response includes HTML and InkML.
+        Falls back to the v1.0 HTML endpoint, without ink, only if the beta request fails.
         Images are returned as URLs — caller fetches them in order via get_page_image().
-        If the beta endpoint fails, ink_image is None but other content is still returned.
         """
-        html = await self.get_page_content(access_token, page_id)
-        has_handwriting = _INK_NODE_COMMENT in html
+        try:
+            html, inkml_xml = await self._get_content_with_inkml(
+                access_token,
+                page_id,
+                connection_key=connection_key,
+            )
+        except Exception as error:
+            logger.warning(
+                "Beta content fetch failed for page %s (%s) — falling back to v1.0 /content without ink",
+                page_id, error,
+            )
+            html = await self.get_page_content(access_token, page_id, connection_key=connection_key)
+            inkml_xml = None
+
         elements = _parse_page_elements(html)
-
-        if not has_handwriting:
-            return GraphPageContent(elements=elements, ink_strokes=[], has_handwriting=False)
-
-        inkml_xml = await self._get_inkml(access_token, page_id)
+        has_handwriting = _INK_NODE_COMMENT in html
         ink_strokes = _parse_inkml_strokes(inkml_xml) if inkml_xml else []
 
-        return GraphPageContent(elements=elements, ink_strokes=ink_strokes, has_handwriting=True)
+        return GraphPageContent(elements=elements, ink_strokes=ink_strokes, has_handwriting=has_handwriting)
 
 
 def get_graph_client(request: Request) -> GraphClient:

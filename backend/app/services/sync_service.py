@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.graph_client import GraphClient, composite_page
+from app.clients.graph_client import GraphClient, GraphConnectionKey, composite_page
 from app.clients.msal_client import MSALClient
 from app.clients.ocr_client import OCRClient
 from app.core.config import settings
@@ -94,7 +94,10 @@ class SyncService:
             access_token = await self._acquire_token(connection)
             if access_token is None:
                 continue
-            graph_notebooks = await self._graph_client.get_notebooks(access_token)
+            graph_notebooks = await self._graph_client.get_notebooks(
+                access_token,
+                connection_key=connection.id,
+            )
             db_notebooks = await self._notebook_repo.upsert_many(
                 connection.user_id,
                 [
@@ -123,7 +126,7 @@ class SyncService:
         access_token = await self._acquire_token(connection)
         if access_token is None:
             raise RuntimeError("Re-auth required — reconnect your Microsoft account")
-        return await self._sync_notebook(notebook, access_token)
+        return await self._sync_notebook(notebook, access_token, connection_key=connection.id)
 
     async def discover_notebooks(self, connection_id: int) -> list[NotebookResponse]:
         """Names-only discovery for one connection: list → upsert → delete-stale.
@@ -138,7 +141,11 @@ class SyncService:
         access_token = await self._acquire_token(connection)
         if access_token is None:
             raise RuntimeError("Re-auth required — reconnect your Microsoft account")
-        return await self._discover_notebooks(connection.user_id, access_token)
+        return await self._discover_notebooks(
+            connection.user_id,
+            access_token,
+            connection_key=connection.id,
+        )
 
     async def sync_single_notebook(self, notebook_id: int) -> None:
         """Inline single-notebook sync by DB id — self-contained status management.
@@ -195,9 +202,15 @@ class SyncService:
         await self._session.commit()
         return token_result.access_token
 
-    async def _discover_notebooks(self, user_id: int, access_token: str) -> list[NotebookResponse]:
+    async def _discover_notebooks(
+        self,
+        user_id: int,
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> list[NotebookResponse]:
         """Names-only Graph discovery: list → upsert → delete-stale. Shared by full sync and refresh."""
-        graph_notebooks = await self._graph_client.get_notebooks(access_token)
+        graph_notebooks = await self._graph_client.get_notebooks(access_token, connection_key=connection_key)
         graph_notebook_ids = {graph_notebook.id for graph_notebook in graph_notebooks}
         logger.info("Found %d notebooks in Graph", len(graph_notebooks))
 
@@ -226,7 +239,7 @@ class SyncService:
         if access_token is None:
             # _acquire_token already flipped the connection to NEEDS_REAUTH
             raise ConflictError("Microsoft session expired — reconnect your account")
-        await self._discover_notebooks(connection.user_id, access_token)
+        await self._discover_notebooks(connection.user_id, access_token, connection_key=connection.id)
 
     async def _sync_connection(self, connection: MicrosoftConnectionResponse) -> None:
         access_token = await self._acquire_token(connection)
@@ -235,7 +248,11 @@ class SyncService:
 
         logger.info("Token acquired for user %s", connection.user_id)
 
-        db_notebooks = await self._discover_notebooks(connection.user_id, access_token)
+        db_notebooks = await self._discover_notebooks(
+            connection.user_id,
+            access_token,
+            connection_key=connection.id,
+        )
 
         enabled_notebooks = [notebook for notebook in db_notebooks if notebook.sync_enabled]
         if not enabled_notebooks:
@@ -256,7 +273,11 @@ class SyncService:
         for notebook in enabled_notebooks:
             sync_started_at = datetime.now(timezone.utc)
             try:
-                latest_page_modified = await self._sync_notebook(notebook, access_token)
+                latest_page_modified = await self._sync_notebook(
+                    notebook,
+                    access_token,
+                    connection_key=connection.id,
+                )
                 await self._notebook_repo.update(
                     notebook.id,
                     _finalize_fresh_update(sync_started_at, latest_page_modified),
@@ -271,13 +292,23 @@ class SyncService:
                 )
                 await self._session.commit()
 
-    async def _sync_notebook(self, notebook: NotebookResponse, access_token: str) -> datetime | None:
+    async def _sync_notebook(
+        self,
+        notebook: NotebookResponse,
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
+    ) -> datetime | None:
         """Sync a notebook's sections + pages. Returns the newest page lastModifiedDateTime
         across the whole notebook (None if it has no pages) — the accurate "last edited"
         signal, which the caller writes onto the notebook when finalising it FRESH."""
         logger.info("Syncing notebook '%s' (last synced: %s)", notebook.display_name, notebook.last_synced_at or "never")
 
-        graph_sections = await self._graph_client.get_sections(access_token, notebook.onenote_id)
+        graph_sections = await self._graph_client.get_sections(
+            access_token,
+            notebook.onenote_id,
+            connection_key=connection_key,
+        )
         graph_section_ids = {graph_section.id for graph_section in graph_sections}
         logger.info("  Found %d sections", len(graph_sections))
 
@@ -295,7 +326,11 @@ class SyncService:
             logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
             await self._section_repo.delete_many(sections_to_delete)
 
-        section_pages = await self._fetch_pages_for_sections(db_sections, access_token)
+        section_pages = await self._fetch_pages_for_sections(
+            db_sections,
+            access_token,
+            connection_key=connection_key,
+        )
 
         latest_page_modified: datetime | None = None
         pages_to_sync: list[PageContentSyncCandidate] = []
@@ -315,21 +350,29 @@ class SyncService:
                 latest_page_modified = section_plan.latest_page_modified
             pages_to_sync.extend(section_plan.pages_to_sync)
 
-        await self._sync_page_contents(pages_to_sync, access_token)
+        await self._sync_page_contents(pages_to_sync, access_token, connection_key=connection_key)
 
         return latest_page_modified
 
     async def _fetch_pages_for_sections(
-        self, sections: list[SectionResponse], access_token: str
+        self,
+        sections: list[SectionResponse],
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
     ) -> list[SectionPages]:
         async def fetch_one(section: SectionResponse) -> SectionPages:
-            graph_pages = await self._graph_client.get_pages(access_token, section.onenote_id)
+            graph_pages = await self._graph_client.get_pages(
+                access_token,
+                section.onenote_id,
+                connection_key=connection_key,
+            )
             return SectionPages(section=section, graph_pages=graph_pages)
 
         if not sections:
             return []
-        # Concurrency here is bounded by the Graph semaphore inside GraphClient (5 concurrent
-        # requests), so we gather all sections rather than adding a second semaphore.
+        # Concurrency here is bounded by GraphClient's per-connection cap, so we gather all
+        # sections rather than adding a second semaphore.
         logger.info("  Fetching page lists for %d section(s)", len(sections))
         return await asyncio.gather(*(fetch_one(section) for section in sections))
 
@@ -397,7 +440,11 @@ class SyncService:
         return SectionSyncPlan(latest_page_modified=latest_page_modified, pages_to_sync=to_sync)
 
     async def _sync_page_contents(
-        self, candidates: list[PageContentSyncCandidate], access_token: str
+        self,
+        candidates: list[PageContentSyncCandidate],
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
     ) -> None:
         if not candidates:
             return
@@ -406,7 +453,11 @@ class SyncService:
 
         async def build_one(candidate: PageContentSyncCandidate) -> PageContentSyncResult:
             async with semaphore:
-                return await self._build_page_content_result(candidate.page, access_token)
+                return await self._build_page_content_result(
+                    candidate.page,
+                    access_token,
+                    connection_key=connection_key,
+                )
 
         logger.info(
             "  Syncing content for %d page(s) with page-worker concurrency=%d",
@@ -428,11 +479,19 @@ class SyncService:
             )
 
     async def _build_page_content_result(
-        self, page: PageResponse, access_token: str
+        self,
+        page: PageResponse,
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
     ) -> PageContentSyncResult:
         logger.info("      Syncing page '%s'", page.title or page.onenote_id)
         try:
-            page_content = await self._graph_client.get_page_content_with_ink(access_token, page.onenote_id)
+            page_content = await self._graph_client.get_page_content_with_ink(
+                access_token,
+                page.onenote_id,
+                connection_key=connection_key,
+            )
 
             text_elements = [element for element in page_content.elements if element.kind == "text" and element.text]
             image_elements = [element for element in page_content.elements if element.kind == "image" and element.image_url]
@@ -445,7 +504,11 @@ class SyncService:
             if page_content.has_handwriting and not page_content.ink_strokes:
                 logger.warning("        InkML fetch failed — ink will not appear in composite")
 
-            image_bytes_map = await self._fetch_page_images(image_elements, access_token)
+            image_bytes_map = await self._fetch_page_images(
+                image_elements,
+                access_token,
+                connection_key=connection_key,
+            )
 
             # Build composite canvas (images at CSS positions, ink strokes on top) and OCR it.
             # Single Vision call per page — the renderer clamps scale so the canvas fits Vision's cap.
@@ -465,7 +528,11 @@ class SyncService:
 
             # PDF "file printouts": fetch each source PDF once and extract text locally (+ OCR the
             # figure pages) instead of fetching N rasterized page-images. See plans/.
-            pdf_texts = await self._extract_pdf_attachments(pdf_elements, access_token)
+            pdf_texts = await self._extract_pdf_attachments(
+                pdf_elements,
+                access_token,
+                connection_key=connection_key,
+            )
 
             content = self._assemble_page_content(text_elements, ocr_text, pdf_texts)
             logger.info("        Final content: %d chars", len(content))
@@ -488,10 +555,14 @@ class SyncService:
             )
 
     async def _fetch_page_images(
-        self, image_elements: list[GraphPageElement], access_token: str
+        self,
+        image_elements: list[GraphPageElement],
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
     ) -> dict[str, bytes]:
-        # Sequential on purpose: one image $value request at a time. The Graph semaphore +
-        # rate limiter already gate throughput, and most pages have few loose images now that
+        # Sequential on purpose: one image $value request at a time. The GraphClient budget
+        # already gates throughput, and most pages have few loose images now that
         # PDF printouts are fetched once as a source file. A failed image is logged and skipped
         # so it doesn't fail the whole page. Parallelize here only if a page's image count is
         # shown to make this the bottleneck.
@@ -501,13 +572,21 @@ class SyncService:
             if not url:
                 continue
             try:
-                image_bytes_map[url] = await self._graph_client.get_page_image(access_token, url)
+                image_bytes_map[url] = await self._graph_client.get_page_image(
+                    access_token,
+                    url,
+                    connection_key=connection_key,
+                )
             except Exception as error:
                 logger.warning("        Failed to fetch image: %s", error)
         return image_bytes_map
 
     async def _extract_pdf_attachments(
-        self, pdf_elements: list[GraphPageElement], access_token: str
+        self,
+        pdf_elements: list[GraphPageElement],
+        access_token: str,
+        *,
+        connection_key: GraphConnectionKey,
     ) -> list[str]:
         """Fetch each PDF printout's source file **once** and extract its text locally.
 
@@ -519,7 +598,11 @@ class SyncService:
         pdf_texts: list[str] = []
         for pdf_element in pdf_elements:
             name = pdf_element.attachment_name or "?"
-            pdf_bytes = await self._graph_client.get_page_image(access_token, pdf_element.resource_url)
+            pdf_bytes = await self._graph_client.get_page_image(
+                access_token,
+                pdf_element.resource_url,
+                connection_key=connection_key,
+            )
             logger.info("        PDF '%s': fetched %d bytes", name, len(pdf_bytes))
 
             extraction = await asyncio.to_thread(

@@ -98,7 +98,7 @@ async def _resolve_page(
     )
 
 
-async def _acquire_token(session: AsyncSession, user_id: int) -> str:
+async def _acquire_token(session: AsyncSession, user_id: int) -> tuple[str, int]:
     connection = await session.scalar(
         select(MicrosoftConnection).where(MicrosoftConnection.user_id == user_id)
     )
@@ -108,7 +108,7 @@ async def _acquire_token(session: AsyncSession, user_id: int) -> str:
         result = get_msal_client().acquire_token_silent(decrypt(connection.encrypted_msal_token_cache))
     except MSALAuthError:
         raise SystemExit("Re-auth required — reconnect your Microsoft account via the app first.")
-    return result.access_token
+    return result.access_token, connection.id
 
 
 async def main(
@@ -124,7 +124,7 @@ async def main(
             "Resolved: id=%d title=%r section=%r notebook=%r",
             resolved.page_db_id, resolved.page_title, resolved.section_name, resolved.notebook_name,
         )
-        access_token = await _acquire_token(session, resolved.user_id)
+        access_token, connection_key = await _acquire_token(session, resolved.user_id)
 
     target_dir = output_dir / f"{resolved.page_db_id}_{_safe_filename(resolved.page_title or resolved.page_onenote_id)}"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +132,11 @@ async def main(
 
     async with GraphClient() as graph_client:
         logger.info("Fetching page HTML + InkML from Graph...")
-        page_content = await graph_client.get_page_content_with_ink(access_token, resolved.page_onenote_id)
+        page_content = await graph_client.get_page_content_with_ink(
+            access_token,
+            resolved.page_onenote_id,
+            connection_key=connection_key,
+        )
 
         text_elements = [element for element in page_content.elements if element.kind == "text" and element.text]
         image_elements = [element for element in page_content.elements if element.kind == "image" and element.image_url]
@@ -149,7 +153,10 @@ async def main(
             logger.info("Fetching %d image(s) in parallel...", len(image_elements))
             urls = [element.image_url for element in image_elements]
             results = await asyncio.gather(
-                *[graph_client.get_page_image(access_token, url) for url in urls],
+                *[
+                    graph_client.get_page_image(access_token, url, connection_key=connection_key)
+                    for url in urls
+                ],
                 return_exceptions=True,
             )
             for url, result in zip(urls, results):

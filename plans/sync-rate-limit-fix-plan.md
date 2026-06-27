@@ -40,7 +40,7 @@ Microsoft removed OneNote from the consolidated [service-specific throttling lim
 Key facts that shape the fix:
 
 - **OneNote does not return a `Retry-After` header on `429`** — confirmed by Microsoft guidance and multiple write-ups, and matches `retry_after=-` in the logs. We must run our own backoff; we cannot lean on the server to tell us how long to wait.
-- The limits are **per app, per user** = per `MicrosoftConnection`. Today the app serves one Microsoft account, so the budget is process-global — the module-level home for the limiter is correct.
+- The limits are **per app, per user** = per `MicrosoftConnection`. The in-process limiter is now keyed by connection id, so each connected Microsoft account gets its own window, cooldown, and concurrency cap inside the single executor.
 - The **400/hour** cap is the true sustained ceiling (~6.7 req/s average is wrong — it's ~6.7 req/**min** sustained). The 120/min is a short-burst allowance. Real-world limits are reportedly more generous than documented, but we design to the documented numbers and expose them as config.
 
 Sources: [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling), [service-specific limits](https://learn.microsoft.com/en-us/graph/throttling-limits), [OneNote throttling Q&A](https://learn.microsoft.com/en-us/answers/questions/5453983/onenote-what-are-the-method-to-avoid-throttling), [Note Bridge: what the docs don't tell you about OneNote rate limiting](https://note-bridge.co/en/blog/microsoft-graph-rate-limiting-onenote).
@@ -60,15 +60,15 @@ Phase 1 does not obviate Phase 2 and vice-versa: the queue guarantees a *single 
 
 ## Phase 1 — Rate limiter + retry hardening
 
-All changes live in `GraphClient._get` and its module-level state, so every caller (sync, MCP server, scripts) is governed automatically — consistent with the "limits live with the resource" principle from the prior plan.
+All requests still funnel through `GraphClient._get`, but the limiter state now lives in a module-level registry keyed by `MicrosoftConnection.id`, so every caller is governed per connection — consistent with the "limits live with the resource" principle from the prior plan.
 
-> ⚠️ The module-level limiter is **process-local**. It correctly caps a single process, but today Graph calls originate from *two* processes (web + cron). Phase 1 alone therefore still allows ~2× the per-user budget when a manual sync and the cron overlap. Phase 2 closes that by collapsing to one executor.
+> ⚠️ The keyed limiter registry is **process-local**. It correctly caps each connection inside a single process, but two executor processes still mean two independent registries for the same connection. Phase 2 closes that by collapsing Graph work to one executor.
 
 ### 1. Add a sliding-window request-rate limiter (the core fix)
 
 OneNote imposes **two limits over two timescales** — burst up to ~120/min, but sustain no more than ~400/hr — so any proactive limiter must track both windows. A token bucket can do this but needs two buckets with continuous-refill math; a **sliding-window log** is the simpler equivalent and is the chosen design.
 
-Module-level state alongside `_graph_semaphore`: a `deque` of monotonic request timestamps + an `asyncio.Lock`. Acquired inside `_get` **before** the concurrency semaphore.
+Module-level registry state keyed by `connection_id`: each budget owns a `deque` of monotonic request timestamps, an `asyncio.Lock`, and a per-connection concurrency semaphore. Acquired inside `_get` **before** the concurrency semaphore.
 
 `acquire()` before each request:
 
@@ -88,9 +88,9 @@ Dependency-free (`collections.deque` + `asyncio.Lock`), memory is a few hundred 
 
 Concurrency is the documented hard cap of 5; with the rate limiter binding at ~120/min (~2/s) it rarely fills even a few slots, so 5 is safe and the limiter — not concurrency — governs throughput.
 
-### 2. Adaptive global cooldown on `429` (since there's no `Retry-After`)
+### 2. Adaptive connection-local cooldown on `429` (since there's no `Retry-After`)
 
-Because OneNote won't tell us how long to wait, a single 429 must back off the **whole executor**, not just the failing request (root-cause #5). Mechanism: one shared "paused-until" deadline that every request checks at the single chokepoint.
+Because OneNote won't tell us how long to wait, a single 429 must back off that **connection's budget**, not just the failing request (root-cause #5). Mechanism: one budget-local "paused-until" deadline that requests for the same `MicrosoftConnection` check at the single chokepoint.
 
 Module-level state, guarded by the limiter's existing lock:
 
@@ -290,10 +290,10 @@ Your instinct is right — this design is **not** portable to Lambda/Functions a
 | File | Change |
 |---|---|
 | `backend/app/core/config.py` | Add `SYNC_GRAPH_RATE_PER_MINUTE` (120), `SYNC_GRAPH_RATE_PER_HOUR` (400); keep `SYNC_GRAPH_CONCURRENCY` at 5. |
-| `backend/app/clients/graph_client.py` | Add module-level sliding-window rate limiter (deque + lock) + global cooldown state; rework `_get` acquire order; extend `_is_retryable`; honor `Retry-After`; bump `_MAX_RETRIES`. |
+| `backend/app/clients/graph_client.py` | Add a module-level per-connection budget registry; each budget owns sliding-window limiter state, cooldown, and concurrency cap. Rework `_get` acquire order; extend `_is_retryable`; honor `Retry-After`; bump `_MAX_RETRIES`. |
 | `backend/.env.example` (if present) | Document the new knobs. |
 
-No changes needed in `sync_service.py` for Phase 1 — the chokepoint is `_get`.
+The per-connection rework also threads `connection_key=connection.id` through `sync_service.py` and the debug scripts so `GraphClient._get` can select the right budget.
 
 ### Phase 2
 | File | Change |
@@ -343,4 +343,4 @@ No changes needed in `sync_service.py` for Phase 1 — the chokepoint is `_get`.
 
 - Microsoft Graph `$batch` / JSON batching (real reduction in call count, but a larger redesign of the fetch layer — track separately).
 - A **distributed** rate limiter (DB/Redis token bucket) — only needed if we ever allow more than one executor process. The single-worker design makes the process-local limiter sufficient, so this stays out of scope unless the single-executor invariant is dropped.
-- Per-`MicrosoftConnection` keyed limiters / queue fairness for multi-account support (the module-global limiter + single queue are correct while the app serves one account; revisit when multi-account lands, per `graph_client.py:46`).
+- Worker concurrency across independent connections / queue fairness for multi-account throughput. The limiter is already keyed per `MicrosoftConnection`; overlapping work across connections is a separate worker scheduling change.

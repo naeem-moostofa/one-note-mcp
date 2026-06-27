@@ -23,12 +23,14 @@ class Settings(BaseSettings):
     MCP_SERVER_URL: str
     SYNC_PAGE_WORKER_CONCURRENCY: int = 10
     SYNC_GRAPH_CONCURRENCY: int = 5
-    # OneNote per-app-per-user request limits; the sliding-window limiter in graph_client
-    # enforces both windows. The documented maxima are 120/min and 400/hr, but the per-image
-    # `$value` route throttles below those, so the per-minute knob is set under the documented
-    # max to stop 429s clustering at the window edge. Tuning direction is *down*, never up.
+    # OneNote per-app-per-user request limits; graph_client enforces these per Microsoft
+    # connection. The documented maxima are 120/min and 400/hr, but the per-image `$value`
+    # route throttles below those, so the per-minute knob is set under the documented max
+    # to stop 429s clustering at the window edge. Tuning direction is *down*, never up.
     SYNC_GRAPH_RATE_PER_MINUTE: int = 90
     SYNC_GRAPH_RATE_PER_HOUR: int = 400
+    SYNC_GRAPH_BUDGET_IDLE_EVICT_S: float = 30 * 60
+    SYNC_GRAPH_BUDGET_EVICT_INTERVAL_S: float = 60
     SYNC_VISION_CONCURRENCY: int = 10
 
     # PDF file-printout extraction (see plans/attachment-fetch-optimization.md). A PDF printout's

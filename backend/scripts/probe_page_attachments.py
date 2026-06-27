@@ -187,23 +187,24 @@ async def main() -> None:
                     logger.warning("Skipping connection %s (token error: %s)", connection.id, error)
                     continue
                 access_token = token_result.access_token
+                connection_key = connection.id
 
-                notebooks = await graph.get_notebooks(access_token)
+                notebooks = await graph.get_notebooks(access_token, connection_key=connection_key)
                 for notebook in notebooks:
                     if name_filters and not any(f in notebook.display_name.lower() for f in name_filters):
                         continue
                     logger.info("Notebook: %s", notebook.display_name)
 
-                    sections = await graph.get_sections(access_token, notebook.id)
+                    sections = await graph.get_sections(access_token, notebook.id, connection_key=connection_key)
                     for section in sections:
-                        pages = await graph.get_pages(access_token, section.id)
+                        pages = await graph.get_pages(access_token, section.id, connection_key=connection_key)
                         for page in pages:
                             if pages_fetched >= args.max_pages:
                                 logger.info("Reached --max-pages=%d; stopping.", args.max_pages)
                                 _report(printout_examples, attachment_objects_seen, pages_fetched, extractions)
                                 return
 
-                            html = await graph.get_page_content(access_token, page.id)
+                            html = await graph.get_page_content(access_token, page.id, connection_key=connection_key)
                             pages_fetched += 1
                             summary = summarize_page_html(html)
                             attachment_objects_seen += len(summary["objects"])
@@ -237,7 +238,11 @@ async def main() -> None:
                                         continue
                                     attachment = obj.get("data-attachment") or "?"
                                     try:
-                                        pdf_bytes = await graph.get_page_image(access_token, obj["data_url"])
+                                        pdf_bytes = await graph.get_page_image(
+                                            access_token,
+                                            obj["data_url"],
+                                            connection_key=connection_key,
+                                        )
                                         result = extract_pdf_text(pdf_bytes)
                                         extractions.append({"notebook": notebook.display_name, "attachment": attachment, "result": result})
                                         logger.info(
