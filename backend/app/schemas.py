@@ -391,6 +391,19 @@ class GraphPage(BaseModel):
     last_modified_datetime: datetime = Field(alias="lastModifiedDateTime")
 
 
+class GraphList(BaseModel, Generic[T]):
+    """A Graph collection plus whether the enumeration is believed complete.
+
+    `complete` is False when we could not confirm via `@odata.count` that every entry was
+    returned — e.g. a throttled/degraded partial 200, which Graph documents can happen
+    *without* a 429. Callers MUST NOT treat an entry's absence as a deletion when this is
+    False, or a partial response silently deletes live local rows (see
+    plans/sync-stale-delete-data-loss.md)."""
+
+    items: list[T] = Field(default_factory=list)
+    complete: bool = True
+
+
 class GraphPageElement(BaseModel):
     kind: Literal["text", "image", "pdf_attachment"]
     text: str | None = None
@@ -417,6 +430,9 @@ class GraphPageContent(BaseModel):
 class SectionPages(BaseModel):
     section: SectionResponse
     graph_pages: list[GraphPage]
+    # Whether the Graph page enumeration was provably complete (@odata.count cross-check).
+    # When False, delete-stale must be skipped so a partial response can't wipe live pages.
+    pages_complete: bool = True
 
 
 class PageContentSyncCandidate(BaseModel):

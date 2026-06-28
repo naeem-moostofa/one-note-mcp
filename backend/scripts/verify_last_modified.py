@@ -65,23 +65,23 @@ async def _pick_notebook(
     """Scan Graph (metadata only) and return (graph_notebook, page_count, max_page_modified)
     for the smallest non-empty notebook. Stops early at the first <= small_threshold."""
     graph_notebooks = await service._graph_client.get_notebooks(access_token, connection_key=connection_key)
-    log.info("Scanning %d notebooks for the smallest non-empty one…", len(graph_notebooks))
+    log.info("Scanning %d notebooks for the smallest non-empty one…", len(graph_notebooks.items))
 
     best = None  # (graph_notebook, count, max_modified)
-    for graph_notebook in graph_notebooks:
+    for graph_notebook in graph_notebooks.items:
         sections = await service._graph_client.get_sections(
             access_token,
             graph_notebook.id,
             connection_key=connection_key,
         )
         pages = []
-        for section in sections:
+        for section in sections.items:
             pages.extend(
-                await service._graph_client.get_pages(
+                (await service._graph_client.get_pages(
                     access_token,
                     section.id,
                     connection_key=connection_key,
-                )
+                )).items
             )
         count = len(pages)
         if count == 0:
@@ -136,7 +136,7 @@ async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: 
                     access_token,
                     connection_key=connection_key,
                 )
-                graph_notebook = next((gn for gn in graph_notebooks if gn.id == chosen_db.onenote_id), None)
+                graph_notebook = next((gn for gn in graph_notebooks.items if gn.id == chosen_db.onenote_id), None)
                 _assert(graph_notebook is not None, "the chosen notebook still exists in Graph")
                 sections = await service._graph_client.get_sections(
                     access_token,
@@ -144,13 +144,13 @@ async def _run(notebook_id_override: int | None, small_threshold: int, use_ocr: 
                     connection_key=connection_key,
                 )
                 pages = []
-                for section in sections:
+                for section in sections.items:
                     pages.extend(
-                        await service._graph_client.get_pages(
+                        (await service._graph_client.get_pages(
                             access_token,
                             section.id,
                             connection_key=connection_key,
-                        )
+                        )).items
                     )
                 _assert(len(pages) >= 1, f"chosen notebook has pages to sync (got {len(pages)})")
                 expected_max = max(page.last_modified_datetime for page in pages)

@@ -17,7 +17,7 @@ from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attem
 
 from app.core.config import settings
 from app.core.exceptions import GraphAPIError
-from app.schemas import GraphNotebook, GraphPage, GraphPageContent, GraphPageElement, GraphSection
+from app.schemas import GraphList, GraphNotebook, GraphPage, GraphPageContent, GraphPageElement, GraphSection
 
 _BASE_URL = "https://graph.microsoft.com/v1.0"
 # Beta uses the same /me/onenote/ path as v1.0, just against the beta base URL
@@ -40,6 +40,11 @@ _TARGET_RENDER_SCALE = 2.0
 # safely under to avoid quality loss; render_scale is clamped to keep canvas ≤ this.
 _MAX_RENDER_PIXELS = 70_000_000
 _BASE_INK_STROKE_WIDTH = 4  # px at 1x scale
+
+# OneNote list endpoints default to 20 entries/page and cap $top at 100. The documented
+# auto-paging via @odata.nextLink applies only when $top is omitted; with $top you page
+# using $skip. We page by $skip at this size and cross-check against @odata.count. See _get_all.
+_GRAPH_LIST_PAGE_SIZE = 100
 
 _M = TypeVar("_M")
 
@@ -165,7 +170,7 @@ class _GraphRateLimiter:
         cooldown = max(cooldown, retry_after)
         self._last_throttle_at = now
         self._paused_until = max(self._paused_until, now + cooldown)
-        logger.warning(
+        logger.info(
             "graph_cooldown level=%d pause_s=%.1f retry_after=%.1f",
             self._throttle_level, self._paused_until - now, retry_after,
         )
@@ -314,7 +319,7 @@ def _log_graph_retry(retry_state: RetryCallState) -> None:
         return
 
     retry_after = error.response.headers.get("retry-after")
-    logger.warning(
+    logger.info(
         "graph_retry url=%s status=%d attempt=%d next_sleep_s=%.1f retry_after=%s",
         error.request.url,
         error.response.status_code,
@@ -605,16 +610,40 @@ class GraphClient:
         model: type[_M],
         *,
         connection_key: GraphConnectionKey,
-    ) -> list[_M]:
+    ) -> GraphList[_M]:
+        """Enumerate a Graph collection with explicit ``$skip`` paging, returning the items
+        plus whether the enumeration is complete.
+
+        OneNote's documented auto-paging via ``@odata.nextLink`` applies only to requests
+        that omit ``$top``; with ``$top`` you page using ``$skip``. We therefore page by
+        ``$skip`` (page size ``_GRAPH_LIST_PAGE_SIZE``) until a short page, and cross-check
+        the total against ``@odata.count`` (requested with ``$count=true`` on the first page).
+
+        ``complete`` is False when the collected count is short of ``@odata.count`` or
+        ``@odata.count`` is absent — i.e. we cannot *prove* we saw the whole collection. The
+        caller must not delete-stale on an incomplete list: Graph can return a partial 200
+        under throttling/degraded health (no 429), and treating absence as deletion would
+        wipe live local rows. See plans/sync-stale-delete-data-loss.md."""
         items: list[_M] = []
-        next_url: str | None = url
-        while next_url:
-            response = await self._get(next_url, access_token, connection_key=connection_key)
+        expected_count: int | None = None
+        skip = 0
+        while True:
+            separator = "&" if "?" in url else "?"
+            paged_url = f"{url}{separator}$top={_GRAPH_LIST_PAGE_SIZE}&$skip={skip}"
+            if skip == 0:
+                paged_url += "&$count=true"
+            response = await self._get(paged_url, access_token, connection_key=connection_key)
             data = response.json()
-            for item in data.get("value", []):
-                items.append(model.model_validate(item))  # type: ignore[attr-defined]
-            next_url = data.get("@odata.nextLink")
-        return items
+            if skip == 0:
+                raw_count = data.get("@odata.count")
+                expected_count = raw_count if isinstance(raw_count, int) else None
+            page = data.get("value", [])
+            items.extend(model.model_validate(item) for item in page)  # type: ignore[attr-defined]
+            if len(page) < _GRAPH_LIST_PAGE_SIZE:
+                break
+            skip += _GRAPH_LIST_PAGE_SIZE
+        complete = expected_count is not None and len(items) >= expected_count
+        return GraphList(items=items, complete=complete)
 
     async def _get_content_with_inkml(
         self,
@@ -642,9 +671,9 @@ class GraphClient:
         access_token: str,
         *,
         connection_key: GraphConnectionKey,
-    ) -> list[GraphNotebook]:
+    ) -> GraphList[GraphNotebook]:
         return await self._get_all(
-            f"{_BASE_URL}/me/onenote/notebooks?$top=100",
+            f"{_BASE_URL}/me/onenote/notebooks",
             access_token,
             GraphNotebook,
             connection_key=connection_key,
@@ -656,9 +685,9 @@ class GraphClient:
         notebook_id: str,
         *,
         connection_key: GraphConnectionKey,
-    ) -> list[GraphSection]:
+    ) -> GraphList[GraphSection]:
         return await self._get_all(
-            f"{_BASE_URL}/me/onenote/notebooks/{notebook_id}/sections?$top=100",
+            f"{_BASE_URL}/me/onenote/notebooks/{notebook_id}/sections",
             access_token,
             GraphSection,
             connection_key=connection_key,
@@ -670,9 +699,9 @@ class GraphClient:
         section_id: str,
         *,
         connection_key: GraphConnectionKey,
-    ) -> list[GraphPage]:
+    ) -> GraphList[GraphPage]:
         return await self._get_all(
-            f"{_BASE_URL}/me/onenote/sections/{section_id}/pages?$top=100",
+            f"{_BASE_URL}/me/onenote/sections/{section_id}/pages",
             access_token,
             GraphPage,
             connection_key=connection_key,

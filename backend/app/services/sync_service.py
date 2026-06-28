@@ -102,7 +102,7 @@ class SyncService:
                 connection.user_id,
                 [
                     NotebookCreate(onenote_id=graph_notebook.id, display_name=graph_notebook.display_name)
-                    for graph_notebook in graph_notebooks
+                    for graph_notebook in graph_notebooks.items
                 ],
             )
             logger.info("Synced %d notebooks for user %s", len(db_notebooks), connection.user_id)
@@ -211,22 +211,31 @@ class SyncService:
     ) -> list[NotebookResponse]:
         """Names-only Graph discovery: list → upsert → delete-stale. Shared by full sync and refresh."""
         graph_notebooks = await self._graph_client.get_notebooks(access_token, connection_key=connection_key)
-        graph_notebook_ids = {graph_notebook.id for graph_notebook in graph_notebooks}
-        logger.info("Found %d notebooks in Graph", len(graph_notebooks))
+        graph_notebook_ids = {graph_notebook.id for graph_notebook in graph_notebooks.items}
+        logger.info("Found %d notebooks in Graph", len(graph_notebooks.items))
 
         db_notebooks = await self._notebook_repo.upsert_many(
             user_id,
             [
                 NotebookCreate(onenote_id=graph_notebook.id, display_name=graph_notebook.display_name)
-                for graph_notebook in graph_notebooks
+                for graph_notebook in graph_notebooks.items
             ],
         )
 
         all_db_notebooks = await self._notebook_repo.list_by_user(user_id)
         notebooks_to_delete = [notebook.id for notebook in all_db_notebooks if notebook.onenote_id not in graph_notebook_ids]
         if notebooks_to_delete:
-            logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
-            await self._notebook_repo.delete_many(notebooks_to_delete)
+            if graph_notebooks.complete:
+                logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
+                await self._notebook_repo.delete_many(notebooks_to_delete)
+            else:
+                # Deleting a notebook cascades to its sections and pages. The Graph list came
+                # back incomplete (throttled/partial 200), so absence here is untrustworthy —
+                # skip the delete rather than risk wiping live data. See plans/sync-stale-delete-data-loss.md.
+                logger.warning(
+                    "Skipping delete of %d notebook(s) — Graph notebook list was incomplete; not treating absence as deletion",
+                    len(notebooks_to_delete),
+                )
 
         return db_notebooks
 
@@ -309,22 +318,30 @@ class SyncService:
             notebook.onenote_id,
             connection_key=connection_key,
         )
-        graph_section_ids = {graph_section.id for graph_section in graph_sections}
-        logger.info("  Found %d sections", len(graph_sections))
+        graph_section_ids = {graph_section.id for graph_section in graph_sections.items}
+        logger.info("  Found %d sections", len(graph_sections.items))
 
         db_sections = await self._section_repo.upsert_many(
             notebook.id,
             [
                 SectionCreate(onenote_id=graph_section.id, display_name=graph_section.display_name)
-                for graph_section in graph_sections
+                for graph_section in graph_sections.items
             ],
         )
 
         all_db_sections = await self._section_repo.list_by_notebook(notebook.id)
         sections_to_delete = [section.id for section in all_db_sections if section.onenote_id not in graph_section_ids]
         if sections_to_delete:
-            logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
-            await self._section_repo.delete_many(sections_to_delete)
+            if graph_sections.complete:
+                logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
+                await self._section_repo.delete_many(sections_to_delete)
+            else:
+                # Deleting a section cascades to its pages; an incomplete Graph list makes
+                # absence untrustworthy. Skip rather than risk wiping live pages.
+                logger.warning(
+                    "  Skipping delete of %d section(s) — Graph section list was incomplete; not treating absence as deletion",
+                    len(sections_to_delete),
+                )
 
         section_pages = await self._fetch_pages_for_sections(
             db_sections,
@@ -339,6 +356,7 @@ class SyncService:
                 section_page_list.section,
                 section_page_list.graph_pages,
                 notebook.last_synced_at,
+                pages_complete=section_page_list.pages_complete,
             )
             if (
                 section_plan.latest_page_modified is not None
@@ -367,7 +385,11 @@ class SyncService:
                 section.onenote_id,
                 connection_key=connection_key,
             )
-            return SectionPages(section=section, graph_pages=graph_pages)
+            return SectionPages(
+                section=section,
+                graph_pages=graph_pages.items,
+                pages_complete=graph_pages.complete,
+            )
 
         if not sections:
             return []
@@ -381,15 +403,29 @@ class SyncService:
         section: SectionResponse,
         graph_pages: list[GraphPage],
         notebook_last_synced_at: datetime | None,
+        *,
+        pages_complete: bool,
     ) -> SectionSyncPlan:
-        """Upsert/delete page metadata and return pages that need content sync."""
+        """Upsert/delete page metadata and return pages that need content sync.
+
+        `pages_complete` is whether the Graph page enumeration was provably complete. When
+        False, the delete-stale step is skipped so a throttled/partial response can't wipe
+        live pages (see plans/sync-stale-delete-data-loss.md)."""
         existing_db_pages = await self._page_repo.list_by_section(section.id)
 
         if not graph_pages:
             logger.info("    Section '%s': no pages in Graph", section.display_name)
             pages_to_delete = [page.id for page in existing_db_pages]
             if pages_to_delete:
-                await self._page_repo.delete_many(pages_to_delete)
+                if pages_complete:
+                    await self._page_repo.delete_many(pages_to_delete)
+                else:
+                    # Empty list from an incomplete enumeration is the catastrophic case: it
+                    # would delete every page in the section. Skip when not provably complete.
+                    logger.warning(
+                        "    Section '%s': skipping delete of %d page(s) — Graph page list was incomplete (empty/partial response); not treating absence as deletion",
+                        section.display_name, len(pages_to_delete),
+                    )
             await self._session.commit()
             return SectionSyncPlan()
 
@@ -404,8 +440,14 @@ class SyncService:
 
         pages_to_delete = [page.id for page in existing_db_pages if page.onenote_id not in graph_pages_map]
         if pages_to_delete:
-            logger.info("    Section '%s': deleting %d pages removed from Graph", section.display_name, len(pages_to_delete))
-            await self._page_repo.delete_many(pages_to_delete)
+            if pages_complete:
+                logger.info("    Section '%s': deleting %d pages removed from Graph", section.display_name, len(pages_to_delete))
+                await self._page_repo.delete_many(pages_to_delete)
+            else:
+                logger.warning(
+                    "    Section '%s': skipping delete of %d stale page(s) — Graph page list was incomplete; not treating absence as deletion",
+                    section.display_name, len(pages_to_delete),
+                )
         await self._session.commit()
 
         if self._force:

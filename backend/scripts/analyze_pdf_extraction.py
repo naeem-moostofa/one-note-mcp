@@ -63,11 +63,11 @@ async def _download_pdf(notebook_filter: str, attachment_filter: str, dest: Path
                 logger.warning("Skipping connection %s (%s)", connection.id, error)
                 continue
             connection_key = connection.id
-            for notebook in await graph.get_notebooks(token, connection_key=connection_key):
+            for notebook in (await graph.get_notebooks(token, connection_key=connection_key)).items:
                 if notebook_filter.lower() not in notebook.display_name.lower():
                     continue
-                for section in await graph.get_sections(token, notebook.id, connection_key=connection_key):
-                    for page in await graph.get_pages(token, section.id, connection_key=connection_key):
+                for section in (await graph.get_sections(token, notebook.id, connection_key=connection_key)).items:
+                    for page in (await graph.get_pages(token, section.id, connection_key=connection_key)).items:
                         html = await graph.get_page_content(token, page.id, connection_key=connection_key)
                         for obj in BeautifulSoup(html, "html.parser").find_all("object"):
                             name = obj.get("data-attachment") or ""

@@ -190,15 +190,15 @@ async def main() -> None:
                 connection_key = connection.id
 
                 notebooks = await graph.get_notebooks(access_token, connection_key=connection_key)
-                for notebook in notebooks:
+                for notebook in notebooks.items:
                     if name_filters and not any(f in notebook.display_name.lower() for f in name_filters):
                         continue
                     logger.info("Notebook: %s", notebook.display_name)
 
                     sections = await graph.get_sections(access_token, notebook.id, connection_key=connection_key)
-                    for section in sections:
+                    for section in sections.items:
                         pages = await graph.get_pages(access_token, section.id, connection_key=connection_key)
-                        for page in pages:
+                        for page in pages.items:
                             if pages_fetched >= args.max_pages:
                                 logger.info("Reached --max-pages=%d; stopping.", args.max_pages)
                                 _report(printout_examples, attachment_objects_seen, pages_fetched, extractions)
