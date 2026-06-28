@@ -15,6 +15,7 @@ two rate limiters = the 429s come back).
 import argparse
 import asyncio
 import logging
+import sys
 
 from app.clients.graph_client import GraphClient
 from app.clients.msal_client import get_msal_client
@@ -26,7 +27,11 @@ from app.repositories.notebook_repository import NotebookRepository
 from app.repositories.sync_job_repository import SyncJobRepository
 from app.services.sync_service import SyncService
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 
 

@@ -19,6 +19,7 @@ import asyncio
 import logging
 import random
 import signal
+import sys
 from datetime import datetime, timezone
 
 from app.clients.graph_client import GraphClient
@@ -32,7 +33,11 @@ from app.repositories.sync_job_repository import SyncJobRepository
 from app.schemas import NotebookUpdate, SyncJobResponse
 from app.services.sync_service import SyncService, _finalize_fresh_update
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 
 
