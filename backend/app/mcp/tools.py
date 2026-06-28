@@ -46,7 +46,8 @@ async def onenote_list_notebooks(
     """Lists the OneNote notebooks this MCP connection can see.
 
     Returns each notebook's id and display_name. Call this first in a new
-    session so you have the notebook IDs needed to scope onenote_search_pages.
+    session so you have the notebook IDs needed to scope one or more
+    onenote_search_pages calls.
     Only notebooks the user has enabled for sync are returned — others won't
     appear here at all, so an empty response means there's nothing searchable.
     """
@@ -70,7 +71,9 @@ async def onenote_search_pages(
 
     Page content mixes verbatim typed text with best-effort OCR of handwritten and image content. OCR portions may contain recognition errors (e.g. `painters` for `Pointers`); search uses fuzzy matching to tolerate them. Snippets are character windows around matches, not sentences — expect mid-sentence cuts.
 
-    Prefer narrow, targeted queries over broad ones. If a snippet doesn't give you enough context, either re-call with a larger `search_size` (up to 250) or call onenote_get_page(page_id) for the full combined content.
+    Prefer search-first exploration over reading full pages. Make multiple search calls with targeted variants, synonyms, quoted phrases, or nearby terms when the first query is uncertain. If snippets are too thin, re-call with a larger `search_size` (up to 250), more `max_pages`, or more `max_snippets_per_page` before using onenote_get_page.
+
+    Do not call onenote_get_page for every hit. Use it only when search has identified a specific page and the returned snippets are still insufficient to answer accurately.
 
     `stale: true` on a hit means the page or its notebook is mid-sync — content may be incomplete.
 
@@ -101,6 +104,8 @@ async def onenote_get_page(
     session: AsyncSession = Depends(get_db_session),
 ) -> PageContent:
     """Fetches the full combined content of a single OneNote page — typed text and OCR text interleaved in visual reading order. Use this when a snippet from onenote_search_pages lacks enough context to answer.
+
+    Before calling this, prefer one or more follow-up searches with alternate terms and/or larger `search_size`, `max_pages`, or `max_snippets_per_page`. Avoid reading full pages as a browsing strategy or calling this for every search hit.
 
     Same content warning as onenote_search_pages: OCR portions may contain recognition errors. Reading order is best-effort, not pixel-faithful.
 
