@@ -41,9 +41,7 @@ _TARGET_RENDER_SCALE = 2.0
 _MAX_RENDER_PIXELS = 70_000_000
 _BASE_INK_STROKE_WIDTH = 4  # px at 1x scale
 
-# OneNote list endpoints default to 20 entries/page and cap $top at 100. The documented
-# auto-paging via @odata.nextLink applies only when $top is omitted; with $top you page
-# using $skip. We page by $skip at this size and cross-check against @odata.count. See _get_all.
+# OneNote caps $top at 100; we page by $skip at this size. See _get_all.
 _GRAPH_LIST_PAGE_SIZE = 100
 
 _M = TypeVar("_M")
@@ -506,19 +504,23 @@ def composite_page(
             render_scale, _TARGET_RENDER_SCALE, canvas_width, canvas_height, _MAX_RENDER_PIXELS // 1_000_000,
         )
 
-    canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+    # Grayscale ("L"): OCR ignores color, so 1 byte/px instead of 3 — a 3x memory cut, no quality loss.
+    canvas = Image.new("L", (canvas_width, canvas_height), "white")
 
     for element in image_elements:
         raw_image = image_bytes_map.get(element.image_url or "")
         if not raw_image:
             continue
         try:
-            image = Image.open(io.BytesIO(raw_image)).convert("RGB")
+            # Close the decoded source and pasted copy promptly to cap peak memory on big images.
+            with Image.open(io.BytesIO(raw_image)) as opened:
+                image = opened.convert("L")
             image_width = int(element.width * render_scale)
             image_height = int(element.height * render_scale)
             if image_width > 0 and image_height > 0:
                 image = image.resize((image_width, image_height), Image.Resampling.LANCZOS)
             canvas.paste(image, (int(element.left * render_scale), int(element.top * render_scale)))
+            image.close()
         except Exception:
             logger.warning("composite_page: failed to draw image at (%.0f, %.0f)", element.left, element.top)
 
@@ -611,19 +613,11 @@ class GraphClient:
         *,
         connection_key: GraphConnectionKey,
     ) -> GraphList[_M]:
-        """Enumerate a Graph collection with explicit ``$skip`` paging, returning the items
-        plus whether the enumeration is complete.
+        """Enumerate a Graph collection via ``$skip`` paging; return items + completeness.
 
-        OneNote's documented auto-paging via ``@odata.nextLink`` applies only to requests
-        that omit ``$top``; with ``$top`` you page using ``$skip``. We therefore page by
-        ``$skip`` (page size ``_GRAPH_LIST_PAGE_SIZE``) until a short page, and cross-check
-        the total against ``@odata.count`` (requested with ``$count=true`` on the first page).
-
-        ``complete`` is False when the collected count is short of ``@odata.count`` or
-        ``@odata.count`` is absent — i.e. we cannot *prove* we saw the whole collection. The
-        caller must not delete-stale on an incomplete list: Graph can return a partial 200
-        under throttling/degraded health (no 429), and treating absence as deletion would
-        wipe live local rows. See plans/sync-stale-delete-data-loss.md."""
+        OneNote only auto-pages via ``@odata.nextLink`` when ``$top`` is omitted, so we page by
+        ``$skip`` and cross-check the total against ``@odata.count``. ``complete`` is False when
+        the total can't be confirmed; callers must not delete-stale on an incomplete list."""
         items: list[_M] = []
         expected_count: int | None = None
         skip = 0

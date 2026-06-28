@@ -1,3 +1,4 @@
+import re
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
     text,
@@ -21,6 +23,23 @@ from sqlalchemy import Enum as SAEnum
 
 class Base(DeclarativeBase):
     pass
+
+
+# NUL is rejected by Postgres text; lone surrogates have no UTF-8 encoding (asyncpg can't send
+# them). These are the only two characters that break a write.
+_POSTGRES_UNSAFE_TEXT = re.compile(r"[\x00\ud800-\udfff]")
+
+
+class SanitizedText(TypeDecorator):
+    """Text column that strips characters Postgres+asyncpg can't store, on write.
+
+    For columns populated from external Graph/OCR/PDF text."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: str | None, dialect) -> str | None:
+        return None if value is None else _POSTGRES_UNSAFE_TEXT.sub("", value)
 
 
 class MicrosoftConnectionStatus(StrEnum):
@@ -67,7 +86,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     microsoft_oid = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True, nullable=False)
-    display_name = Column(String, nullable=False)
+    display_name = Column(SanitizedText, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -86,7 +105,7 @@ class Notebook(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     onenote_id = Column(String, nullable=False)
-    display_name = Column(String, nullable=False)
+    display_name = Column(SanitizedText, nullable=False)
     sync_enabled = Column(Boolean, nullable=False, server_default=text("false"), default=False)
     sync_status = Column(
         SAEnum(NotebookSyncStatus, name="notebook_sync_status"),
@@ -105,7 +124,7 @@ class Section(Base):
     id = Column(Integer, primary_key=True)
     notebook_id = Column(Integer, ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
     onenote_id = Column(String, nullable=False)
-    display_name = Column(String, nullable=False)
+    display_name = Column(SanitizedText, nullable=False)
 
     __table_args__ = (UniqueConstraint("notebook_id", "onenote_id"),)
 
@@ -116,8 +135,8 @@ class Page(Base):
     id = Column(Integer, primary_key=True)
     section_id = Column(Integer, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False)
     onenote_id = Column(String, nullable=False)
-    title = Column(String, nullable=True)
-    content = Column(Text, nullable=True)
+    title = Column(SanitizedText, nullable=True)
+    content = Column(SanitizedText, nullable=True)
     search_vector = Column(TSVECTOR, Computed("to_tsvector('english', coalesce(content, ''))", persisted=True))
     sync_status = Column(
         SAEnum(PageSyncStatus, name="page_sync_status"),

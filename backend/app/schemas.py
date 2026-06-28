@@ -392,13 +392,10 @@ class GraphPage(BaseModel):
 
 
 class GraphList(BaseModel, Generic[T]):
-    """A Graph collection plus whether the enumeration is believed complete.
+    """A Graph collection and whether the enumeration was provably complete.
 
-    `complete` is False when we could not confirm via `@odata.count` that every entry was
-    returned — e.g. a throttled/degraded partial 200, which Graph documents can happen
-    *without* a 429. Callers MUST NOT treat an entry's absence as a deletion when this is
-    False, or a partial response silently deletes live local rows (see
-    plans/sync-stale-delete-data-loss.md)."""
+    When `complete` is False (couldn't confirm via `@odata.count`), callers must not treat a
+    missing entry as a deletion — a partial response would wipe live rows."""
 
     items: list[T] = Field(default_factory=list)
     complete: bool = True
@@ -430,9 +427,7 @@ class GraphPageContent(BaseModel):
 class SectionPages(BaseModel):
     section: SectionResponse
     graph_pages: list[GraphPage]
-    # Whether the Graph page enumeration was provably complete (@odata.count cross-check).
-    # When False, delete-stale must be skipped so a partial response can't wipe live pages.
-    pages_complete: bool = True
+    pages_complete: bool = True  # False → skip delete-stale (a partial list mustn't wipe pages)
 
 
 class PageContentSyncCandidate(BaseModel):

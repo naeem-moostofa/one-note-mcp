@@ -31,7 +31,7 @@ from app.models import NotebookSyncStatus, SyncJobKind, SyncJobSource
 from app.repositories.notebook_repository import NotebookRepository
 from app.repositories.sync_job_repository import SyncJobRepository
 from app.schemas import NotebookUpdate, SyncJobResponse
-from app.services.sync_service import SyncService, _finalize_fresh_update
+from app.services.sync_service import SyncService, _build_fresh_notebook_update
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,7 +139,7 @@ class SyncWorker:
             try:
                 latest_page_modified = await service.sync_notebook_content(job.notebook_id)
                 await notebook_repo.update(
-                    job.notebook_id, _finalize_fresh_update(sync_started_at, latest_page_modified)
+                    job.notebook_id, _build_fresh_notebook_update(sync_started_at, latest_page_modified)
                 )
                 await job_repo.mark_succeeded(job.id)
                 await session.commit()

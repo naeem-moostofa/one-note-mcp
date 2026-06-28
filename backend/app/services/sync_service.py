@@ -38,10 +38,10 @@ from app.utils.pdf_extract import extract_pdf, merge_pdf_text
 logger = logging.getLogger(__name__)
 
 
-def _finalize_fresh_update(
+def _build_fresh_notebook_update(
     sync_started_at: datetime, latest_page_modified: datetime | None
 ) -> NotebookUpdate:
-    """Build the NotebookUpdate that finalises a notebook FRESH after a content sync.
+    """Build the NotebookUpdate that marks a notebook FRESH after a content sync.
 
     Writes last_modified_datetime (the newest page edit time) only when the sync
     actually saw pages — a pageless notebook leaves the existing value untouched
@@ -167,7 +167,7 @@ class SyncService:
             latest_page_modified = await self.sync_notebook_content(notebook_id)
             await self._notebook_repo.update(
                 notebook_id,
-                _finalize_fresh_update(sync_started_at, latest_page_modified),
+                _build_fresh_notebook_update(sync_started_at, latest_page_modified),
             )
             await self._session.commit()
             logger.info("Notebook '%s' synced successfully", notebook.display_name)
@@ -229,9 +229,7 @@ class SyncService:
                 logger.info("Deleting %d notebooks removed from Graph", len(notebooks_to_delete))
                 await self._notebook_repo.delete_many(notebooks_to_delete)
             else:
-                # Deleting a notebook cascades to its sections and pages. The Graph list came
-                # back incomplete (throttled/partial 200), so absence here is untrustworthy —
-                # skip the delete rather than risk wiping live data. See plans/sync-stale-delete-data-loss.md.
+                # Incomplete list: a notebook delete cascades to pages, so don't trust absence here.
                 logger.warning(
                     "Skipping delete of %d notebook(s) — Graph notebook list was incomplete; not treating absence as deletion",
                     len(notebooks_to_delete),
@@ -289,7 +287,7 @@ class SyncService:
                 )
                 await self._notebook_repo.update(
                     notebook.id,
-                    _finalize_fresh_update(sync_started_at, latest_page_modified),
+                    _build_fresh_notebook_update(sync_started_at, latest_page_modified),
                 )
                 await self._session.commit()
                 logger.info("Notebook '%s' synced successfully", notebook.display_name)
@@ -336,8 +334,7 @@ class SyncService:
                 logger.info("  Deleting %d sections removed from Graph", len(sections_to_delete))
                 await self._section_repo.delete_many(sections_to_delete)
             else:
-                # Deleting a section cascades to its pages; an incomplete Graph list makes
-                # absence untrustworthy. Skip rather than risk wiping live pages.
+                # Incomplete list: a section delete cascades to pages, so don't trust absence here.
                 logger.warning(
                     "  Skipping delete of %d section(s) — Graph section list was incomplete; not treating absence as deletion",
                     len(sections_to_delete),
@@ -408,9 +405,8 @@ class SyncService:
     ) -> SectionSyncPlan:
         """Upsert/delete page metadata and return pages that need content sync.
 
-        `pages_complete` is whether the Graph page enumeration was provably complete. When
-        False, the delete-stale step is skipped so a throttled/partial response can't wipe
-        live pages (see plans/sync-stale-delete-data-loss.md)."""
+        When `pages_complete` is False the delete-stale step is skipped (a partial list must
+        not wipe live pages)."""
         existing_db_pages = await self._page_repo.list_by_section(section.id)
 
         if not graph_pages:
@@ -420,8 +416,7 @@ class SyncService:
                 if pages_complete:
                     await self._page_repo.delete_many(pages_to_delete)
                 else:
-                    # Empty list from an incomplete enumeration is the catastrophic case: it
-                    # would delete every page in the section. Skip when not provably complete.
+                    # Empty + incomplete would delete every page in the section — skip.
                     logger.warning(
                         "    Section '%s': skipping delete of %d page(s) — Graph page list was incomplete (empty/partial response); not treating absence as deletion",
                         section.display_name, len(pages_to_delete),
@@ -491,34 +486,51 @@ class SyncService:
         if not candidates:
             return
 
-        semaphore = asyncio.Semaphore(self._page_worker_concurrency)
-
-        async def build_one(candidate: PageContentSyncCandidate) -> PageContentSyncResult:
-            async with semaphore:
-                return await self._build_page_content_result(
-                    candidate.page,
-                    access_token,
-                    connection_key=connection_key,
-                )
-
         logger.info(
             "  Syncing content for %d page(s) with page-worker concurrency=%d",
             len(candidates),
             self._page_worker_concurrency,
         )
-        tasks = [asyncio.create_task(build_one(candidate)) for candidate in candidates]
+
+        # Sequential: no tasks to leak after a job failure, and the AsyncSession stays single-flow.
+        if self._page_worker_concurrency <= 1:
+            for index, candidate in enumerate(candidates, start=1):
+                result = await self._build_page_content_result(
+                    candidate.page, access_token, connection_key=connection_key,
+                )
+                await self._apply_page_content_result(result)
+                self._log_page_progress(index, len(candidates), result)
+            return
+
+        # Build concurrently, but serialize DB applies behind a lock (AsyncSession isn't
+        # concurrency-safe). TaskGroup cancels remaining builders if one fails.
+        semaphore = asyncio.Semaphore(self._page_worker_concurrency)
+        apply_lock = asyncio.Lock()
         completed = 0
-        for task in asyncio.as_completed(tasks):
-            result = await task
-            completed += 1
-            await self._apply_page_content_result(result)
-            logger.info(
-                "      Page content progress: %d/%d (%s -> %s)",
-                completed,
-                len(candidates),
-                result.title or result.onenote_id,
-                result.sync_status.value,
-            )
+
+        async def build_and_apply(candidate: PageContentSyncCandidate) -> None:
+            nonlocal completed
+            async with semaphore:
+                result = await self._build_page_content_result(
+                    candidate.page, access_token, connection_key=connection_key,
+                )
+            async with apply_lock:
+                await self._apply_page_content_result(result)
+                completed += 1
+                self._log_page_progress(completed, len(candidates), result)
+
+        async with asyncio.TaskGroup() as task_group:
+            for candidate in candidates:
+                task_group.create_task(build_and_apply(candidate))
+
+    def _log_page_progress(self, completed: int, total: int, result: PageContentSyncResult) -> None:
+        logger.info(
+            "      Page content progress: %d/%d (%s -> %s)",
+            completed,
+            total,
+            result.title or result.onenote_id,
+            result.sync_status.value,
+        )
 
     async def _build_page_content_result(
         self,
