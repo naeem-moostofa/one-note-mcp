@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str
     GOOGLE_CLOUD_VISION_API_KEY: str
     MCP_SERVER_URL: str
-    SYNC_PAGE_WORKER_CONCURRENCY: int = 1
+    SYNC_PAGE_WORKER_CONCURRENCY: int = 3
     SYNC_GRAPH_CONCURRENCY: int = 5
     # OneNote per-app-per-user request limits; graph_client enforces these per Microsoft
     # connection. The documented maxima are 120/min and 400/hr, but the per-image `$value`
