@@ -19,8 +19,11 @@ mcp = FastMCP(
     instructions=(
         "Read-only access to a user's OneNote notebooks. "
         "Use `onenote_list_notebooks` first to discover notebook IDs, then "
-        "`onenote_search_pages` to find relevant pages within those notebooks, "
-        "and `onenote_get_page` to read the full content of a specific page."
+        "use `onenote_search_pages` as the primary way to gather context. "
+        "Prefer several targeted or alternate search queries, and increase "
+        "`search_size`, `max_pages`, or `max_snippets_per_page` when useful, "
+        "before reading full pages. Use `onenote_get_page` sparingly only after "
+        "search snippets identify a specific page whose full content is needed."
     ),
 )
 
