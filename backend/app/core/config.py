@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str
     GOOGLE_CLOUD_VISION_API_KEY: str
     MCP_SERVER_URL: str
+
+    # WorkOS AuthKit — fronts the MCP server with OAuth 2.1 for web connectors
+    # (claude.ai / ChatGPT). Left blank for local dev: when WORKOS_AUTHKIT_DOMAIN
+    # is empty the MCP server falls back to the onmcp_ bearer path only. See
+    # plans/mcp-oauth-web-clients.md.
+    WORKOS_API_KEY: str = ""
+    WORKOS_CLIENT_ID: str = ""
+    WORKOS_AUTHKIT_DOMAIN: str = ""     # issuer; JWKS + AS metadata discovered from here
     SYNC_PAGE_WORKER_CONCURRENCY: int = 3
     SYNC_GRAPH_CONCURRENCY: int = 5
     # OneNote per-app-per-user request limits; graph_client enforces these per Microsoft

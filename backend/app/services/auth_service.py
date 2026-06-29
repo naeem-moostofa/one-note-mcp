@@ -7,7 +7,7 @@ from app.core.auth import create_jwt
 from app.core.encryption import encrypt
 from app.repositories.microsoft_connection_repository import MicrosoftConnectionRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas import MicrosoftConnectionCreate, MSALAuthCodeFlow, UserCreate
+from app.schemas import MicrosoftConnectionCreate, MSALAuthCodeFlow, UserCreate, UserResponse
 
 
 class AuthService:
@@ -23,6 +23,12 @@ class AuthService:
 
     async def complete_login(self, flow: MSALAuthCodeFlow, auth_response: dict) -> str:
         """Exchange the auth code for tokens and upsert the user. Returns a signed JWT."""
+        user = await self.complete_login_user(flow, auth_response)
+        return create_jwt(user.id)
+
+    async def complete_login_user(self, flow: MSALAuthCodeFlow, auth_response: dict) -> UserResponse:
+        """Exchange the auth code, upsert the (oid-deduped) user + MSAL cache, and
+        return the user. The OAuth bridge needs the user row itself, not a JWT."""
         token_result = self._msal_client.exchange_code(flow, auth_response)
         claims = token_result.id_token_claims
 
@@ -36,7 +42,7 @@ class AuthService:
             encrypted_msal_token_cache=encrypt(token_result.serialized_cache),
         ))
 
-        return create_jwt(user.id)
+        return user
 
     async def disconnect(self, user_id: int) -> None:
         await self._connection_repo.delete_by_user_id(user_id)

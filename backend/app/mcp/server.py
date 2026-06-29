@@ -7,15 +7,16 @@ The HTTP-mounted form (`mcp_app`) is what `app/main.py` mounts at `/mcp`. The
 
 from fastmcp import FastMCP
 
-from app.mcp.auth import MCPConnectionTokenVerifier
+from app.mcp.workos_auth import build_mcp_auth
 
 
 mcp = FastMCP(
     "OneNote MCP",
-    # Verifier runs before every tool call — authenticates the bearer token
-    # against the mcp_connections table and stashes the resolved scope in
-    # AccessToken.claims for tools to read via current_scope().
-    auth=MCPConnectionTokenVerifier(),
+    # Auth runs before every tool call. Composite: WorkOS AuthKit (web OAuth 2.1
+    # clients) + the onmcp_ bearer path (CLI clients) when WorkOS is configured,
+    # otherwise the onmcp_ verifier alone. Both converge on the same
+    # AccessToken.claims shape that tools read via current_scope().
+    auth=build_mcp_auth(),
     instructions=(
         "Read-only access to a user's OneNote notebooks. "
         "Use `onenote_list_notebooks` first to discover notebook IDs, then "
