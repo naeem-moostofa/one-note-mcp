@@ -90,6 +90,25 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class OAuthLoginFlow(Base):
+    """Short-lived server-side store for an in-flight Microsoft login.
+
+    The MSAL auth-code flow (code_verifier etc.) used to ride in a `oauth_flow`
+    cookie, but the WorkOS bridge is a cross-site redirect bounce
+    (WorkOS → us → Microsoft → us) and browsers drop cookies set by a redirect-only
+    middleman. So we key the flow on the OAuth `state` parameter instead — it
+    round-trips through Microsoft in the URL, no cookie needed. `external_auth_id`
+    is set only for bridge logins. Rows are single-use (deleted on callback) and
+    swept after a short TTL. See plans/mcp-oauth-web-clients.md.
+    """
+    __tablename__ = "oauth_login_flows"
+
+    state = Column(String, primary_key=True)
+    encrypted_flow = Column(Text, nullable=False)
+    external_auth_id = Column(String, nullable=True)  # bridge logins only; NULL = normal SPA login
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class MicrosoftConnection(Base):
     __tablename__ = "microsoft_connections"
 

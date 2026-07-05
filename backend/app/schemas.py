@@ -41,6 +41,15 @@ class MicrosoftConnectionResponse(BaseModel):
     status: MicrosoftConnectionStatus
 
 
+class OAuthLoginFlowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    state: str
+    encrypted_flow: str
+    external_auth_id: str | None
+    created_at: datetime
+
+
 class NotebookResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -187,6 +196,12 @@ class UserCreate(BaseModel):
 
 class MicrosoftConnectionCreate(BaseModel):
     encrypted_msal_token_cache: str
+
+
+class OAuthLoginFlowCreate(BaseModel):
+    state: str
+    encrypted_flow: str
+    external_auth_id: str | None = None
 
 
 class NotebookCreate(BaseModel):
