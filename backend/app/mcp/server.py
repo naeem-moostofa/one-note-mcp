@@ -7,6 +7,7 @@ The HTTP-mounted form (`mcp_app`) is what `app/main.py` mounts at `/mcp`. The
 
 from fastmcp import FastMCP
 
+from app.mcp.tool_call_logging import MCPToolCallLoggingMiddleware
 from app.mcp.workos_auth import build_mcp_auth
 
 
@@ -27,6 +28,7 @@ mcp = FastMCP(
         "search snippets identify a specific page whose full content is needed."
     ),
 )
+mcp.add_middleware(MCPToolCallLoggingMiddleware())
 
 # Importing the tools module registers the @mcp.tool decorators on the instance
 # above. Must come after `mcp` is defined and before `mcp_app` is built.
