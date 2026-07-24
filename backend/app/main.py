@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,67 @@ from app.routers import auth, mcp_connections, me, notebooks, oauth_bridge
 from sync.worker import SyncWorker
 
 logger = logging.getLogger(__name__)
+
+
+class _CanonicalIssuer:
+    """Name the authorization server exactly as the authorization server names itself.
+
+    Pydantic's AnyHttpUrl appends a trailing slash to a bare origin, so our
+    Protected Resource Metadata advertises `https://…authkit.app/` while AuthKit's
+    own metadata declares `issuer: https://…authkit.app`. RFC 8414 has the client
+    compare those two strings, and a client that rejects the mismatch never reads
+    the `registration_endpoint` it needs to register itself.
+
+    Wraps the route's ASGI app rather than its handler, because FastMCP has already
+    wrapped these routes in CORS middleware — so the body is only reachable from
+    outside, as response messages.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start: dict = {}
+        chunks: list[bytes] = []
+
+        async def capture(message) -> None:
+            if message["type"] == "http.response.start":
+                start.update(message)
+                return
+            if message["type"] != "http.response.body":
+                await send(message)
+                return
+
+            chunks.append(message.get("body", b""))
+            if message.get("more_body"):
+                return
+
+            body = b"".join(chunks)
+            try:
+                document = json.loads(body)
+                servers = document.get("authorization_servers")
+                if servers:
+                    document["authorization_servers"] = [
+                        str(server).rstrip("/") for server in servers
+                    ]
+                    body = json.dumps(document).encode()
+            except (ValueError, AttributeError):
+                pass  # not the JSON we expected — pass the original through untouched
+
+            headers = [
+                (key, value)
+                for key, value in start.get("headers", [])
+                if key.lower() != b"content-length"
+            ]
+            headers.append((b"content-length", str(len(body)).encode()))
+            await send({**start, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        await self.app(scope, receive, capture)
 
 
 def _is_mcp_path(path: str) -> bool:
@@ -68,7 +130,14 @@ def _expose_mcp_well_known_at_root(application: FastAPI) -> None:
     """
     for index, route in enumerate(mcp_app.routes):
         if isinstance(route, Route) and route.path.startswith("/.well-known/"):
-            mcp_app.routes[index] = _with_cors(route)
+            route = _with_cors(route)
+            if "oauth-protected-resource" in route.path:
+                route = Route(
+                    route.path,
+                    endpoint=_CanonicalIssuer(route.endpoint),
+                    methods=route.methods,
+                )
+            mcp_app.routes[index] = route
 
     seen: set[str] = set()
     for route in mcp_app.routes:
