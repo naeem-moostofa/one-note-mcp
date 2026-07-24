@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from mcp.server.auth.routes import cors_middleware
 from starlette.routing import Route
 
 from app.clients.graph_client import GraphClient
@@ -17,6 +18,41 @@ from sync.worker import SyncWorker
 logger = logging.getLogger(__name__)
 
 
+def _is_mcp_path(path: str) -> bool:
+    return path.startswith("/mcp") or path.startswith("/.well-known/")
+
+
+class FrontendCORSMiddleware(CORSMiddleware):
+    """The frontend's credentialed CORS policy, applied to everything but MCP.
+
+    Starlette answers preflights itself, before routing, so this policy's
+    single-origin allowlist would reject preflights for the MCP transport and
+    discovery routes — which carry their own permissive, credential-less CORS
+    and are meant to be reachable from any web client's origin.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and _is_mcp_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+def _with_cors(route: Route) -> Route:
+    """Wrap a discovery route in permissive CORS unless it already carries it.
+
+    FastMCP wraps the Protected Resource Metadata routes but not AuthKitProvider's
+    forwarded authorization-server metadata, which it registers as a bare GET
+    route. That one answers a browser with no Access-Control-Allow-Origin and
+    405s the preflight, and web clients discover from a page context — a blocked
+    fetch surfaces there as an opaque network error, not an HTTP status.
+    """
+    if isinstance(route.endpoint, CORSMiddleware):
+        return route
+    methods = sorted({*(route.methods or {"GET"}), "OPTIONS"})
+    return Route(route.path, endpoint=cors_middleware(route.endpoint, methods), methods=methods)
+
+
 def _expose_mcp_well_known_at_root(application: FastAPI) -> None:
     """Serve the MCP auth provider's OAuth discovery documents at the host root.
 
@@ -26,7 +62,14 @@ def _expose_mcp_well_known_at_root(application: FastAPI) -> None:
     discovery, and where our 401 challenge points. The provider's routes are
     stateless metadata generators, so we re-expose them at root (a no-op when
     WorkOS isn't configured, since the onmcp_-only verifier adds no such routes).
+
+    Each is CORS-wrapped in place first, so the mounted /mcp copies are fixed
+    too and the root copies inherit it.
     """
+    for index, route in enumerate(mcp_app.routes):
+        if isinstance(route, Route) and route.path.startswith("/.well-known/"):
+            mcp_app.routes[index] = _with_cors(route)
+
     seen: set[str] = set()
     for route in mcp_app.routes:
         path = getattr(route, "path", "")
@@ -72,7 +115,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
-    CORSMiddleware,
+    FrontendCORSMiddleware,
     allow_origins=[settings.FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],

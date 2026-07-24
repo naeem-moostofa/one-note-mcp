@@ -2,14 +2,15 @@
 End-to-end smoke test for the MCP layer's underlying services.
 
 Seeds a minimal corpus (1 user, 2 notebooks, 1 section each, 2 pages), then
-exercises MCPConnectionService → NotebookService → SearchService →
+exercises MCPConnectionService → SearchService →
 PageRepository.get_with_context. Cleans up at the end.
 
 Verifies:
   - Raw-token round-trip: create → hash → resolve → same scope
   - Scope intersection: revoked tokens fail, out-of-scope notebooks filtered
   - The fixed `get_with_context` runs (the Page.last_synced_at bug is gone)
-  - SearchService end-to-end still works
+  - Search returns flat, capped, self-contained snippets
+  - Snippet expansion: chainable, scope-enforced, stale-handle detection
 
 Usage:
     uv run python -m scripts.smoke_mcp
@@ -36,8 +37,7 @@ from app.models import (
 from app.mcp.auth import MCPConnectionTokenVerifier
 from app.repositories.page_repository import PageRepository
 from app.services.mcp_connection_service import MCPConnectionService
-from app.services.notebook_service import NotebookService
-from app.services.search_service import SearchService
+from app.services.search_service import MAX_SNIPPET_CHARS, SearchService, encode_handle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("smoke_mcp")
@@ -66,11 +66,30 @@ async def _seed():
         session.add_all([lecture_section, notes_section])
         await session.flush()
 
+        # Long enough, and split into blocks, that a snippet covers only part of
+        # the page — otherwise expansion has nowhere to grow and the chainable
+        # -handle checks below are vacuous.
         pointers_page = Page(
             section_id=lecture_section.id,
             onenote_id="pg-1",
             title="Pointers",
-            content="A pointer holds the address of another variable. Pointer arithmetic in C lets you traverse arrays.",
+            content=(
+                "A pointer holds the address of another variable. Pointer arithmetic in C "
+                "lets you traverse arrays without indexing them directly.\n\n"
+                "Declaring one is `int *p = &x;` — the star belongs to the variable, not the "
+                "type, which is why `int* a, b;` declares one pointer and one plain int. "
+                "Dereferencing with `*p` reads through to the pointed-at storage.\n\n"
+                "The null pointer is the one address guaranteed not to name an object. "
+                "Dereferencing it is undefined behaviour, not a guaranteed crash, which is "
+                "why the compiler is free to delete a null check that appears after a "
+                "dereference of the same variable.\n\n"
+                "Array decay: an array expression converts to a pointer to its first element "
+                "in almost every context, so `sizeof` inside a callee no longer sees the "
+                "array. Pass the length alongside the pointer or the callee cannot know it.\n\n"
+                "A dangling pointer outlives the storage it names — returning the address of "
+                "a local, or reading through a pointer after free(). The value still looks "
+                "like an address and nothing on the pointer itself records that it went bad."
+            ),
         )
         memory_page = Page(
             section_id=lecture_section.id,
@@ -143,60 +162,85 @@ async def _run(ids: dict[str, int]) -> None:
         "scope_all_notebooks intersects with sync_enabled — excludes the disabled notebook",
     )
 
-    # 2. NotebookService.list_enabled_summaries reflects the same intersection
-    #    when the caller supplies the scope's allowed_notebook_ids as the filter.
+    # 2. SearchService.search via the same path the MCP tool will take.
     async with AsyncSessionLocal() as session:
-        notebooks = await NotebookService(session).list_enabled_summaries(
-            user_id=scope.user_id,
-            filter_notebook_ids=scope.allowed_notebook_ids,
-        )
-    names = sorted(n.display_name for n in notebooks)
-    _assert(names == ["CS 246", "Personal"], f"list_enabled_summaries(filter=…) returned {names!r}")
-
-    # Also verify the service is scope-blind: no filter = all sync-enabled.
-    async with AsyncSessionLocal() as session:
-        all_synced = await NotebookService(session).list_enabled_summaries(user_id=scope.user_id)
-    all_names = sorted(n.display_name for n in all_synced)
-    _assert(all_names == ["CS 246", "Personal"], f"list_enabled_summaries(no filter) returned {all_names!r}")
-    _assert(
-        all(set(vars(n).keys()) == {"id", "display_name"} for n in notebooks),
-        "NotebookSummary carries only id + display_name (no sync_status / last_synced_at)",
-    )
-
-    # 3. SearchService.search via the same path the MCP tool will take.
-    async with AsyncSessionLocal() as session:
-        hits = await SearchService(session).search(
+        snippets = await SearchService(session).search(
             query="pointer",
             notebook_ids=scope.allowed_notebook_ids,
-            search_size=80,
-            max_pages=5,
-            max_snippets_per_page=3,
         )
-    _assert(len(hits) >= 1, f"search('pointer') returned hits ({len(hits)})")
-    pointer_hit = next((h for h in hits if h.page_id == ids["page_pointers"]), None)
-    _assert(pointer_hit is not None, "the Pointers page is among the hits")
-    assert pointer_hit is not None
-    _assert(pointer_hit.notebook_name == "CS 246", "hit's notebook_name is CS 246")
-    _assert(pointer_hit.section_name == "Lecture 4", "hit's section_name is Lecture 4")
-    _assert(not hasattr(pointer_hit, "notebook_id") or "notebook_id" not in pointer_hit.model_dump(), "SearchHit no longer carries notebook_id")
-    _assert(len(pointer_hit.snippets) > 0, "hit has at least one snippet")
+    _assert(len(snippets) >= 1, f"search('pointer') returned snippets ({len(snippets)})")
+    pointer = next((s for s in snippets if "Pointers" in s.page), None)
+    _assert(pointer is not None, "the Pointers page is among the snippets")
+    assert pointer is not None
+    _assert(pointer.page == "CS 246 > Lecture 4 > Pointers", f"breadcrumb is notebook > section > page, got {pointer.page!r}")
+    _assert(pointer.snippet_id != "", "snippet carries an expansion handle")
     _assert(
-        "start_offset" not in pointer_hit.snippets[0].model_dump(),
-        "SearchSnippet no longer carries start_offset",
+        max(len(s.text or "") for s in snippets) <= MAX_SNIPPET_CHARS,
+        f"no snippet exceeds the {MAX_SNIPPET_CHARS}-char cap",
     )
-    _assert(pointer_hit.stale is False, "the Pointers hit is not stale (notebook + page healthy)")
+    _assert("stale" not in pointer.model_dump(), "stale is omitted when false")
+    _assert("error" not in pointer.model_dump(), "error is omitted when unset")
 
-    # 4. Hit from notebook B (which is mid-sync) → stale: True.
+    # 3. Name filters resolve without the caller looking up ids first.
     async with AsyncSessionLocal() as session:
-        personal_hits = await SearchService(session).search(
+        filtered = await SearchService(session).search(
+            query="pointer",
+            notebook_ids=scope.allowed_notebook_ids,
+            notebook="CS 246",
+        )
+    _assert(all("CS 246" in s.page for s in filtered), "notebook name filter keeps only CS 246 snippets")
+
+    # 4. Snippets from notebook B (which is mid-sync) → stale: True.
+    async with AsyncSessionLocal() as session:
+        personal = await SearchService(session).search(
             query="apples",
             notebook_ids=[ids["personal_notebook"]],
-            search_size=80,
-            max_pages=5,
-            max_snippets_per_page=3,
         )
-    _assert(len(personal_hits) == 1, "search in notebook B found the grocery page")
-    _assert(personal_hits[0].stale is True, "grocery hit is stale because notebook B is SYNCING")
+    _assert(len(personal) >= 1, "search in notebook B found the grocery page")
+    _assert(personal[0].stale is True, "grocery snippet is stale because notebook B is SYNCING")
+    _assert(personal[0].model_dump().get("stale") is True, "stale IS serialized when true")
+
+    # 4b. Expansion: chainable, scope-enforced, and stale-handle detection.
+    async with AsyncSessionLocal() as session:
+        service = SearchService(session)
+        expanded = await service.expand_snippets([pointer.snippet_id], scope.allowed_notebook_ids)
+        _assert(len(expanded) == 1, "expanding one snippet returns one result")
+        _assert(expanded[0].error is None, f"expansion succeeded: {expanded[0].error}")
+        _assert(
+            len(expanded[0].text or "") >= len(pointer.text or ""),
+            "expanded snippet is at least as long as the original",
+        )
+        _assert(
+            expanded[0].snippet_id != pointer.snippet_id,
+            "expansion returns a fresh handle so it can be expanded again",
+        )
+
+        again = await service.expand_snippets([expanded[0].snippet_id], scope.allowed_notebook_ids)
+        _assert(again[0].error is None, "the fresh handle expands again (chainable)")
+
+        # A handle whose page is outside the caller's scope must not resolve.
+        out_of_scope = await service.expand_snippets([pointer.snippet_id], [ids["personal_notebook"]])
+        _assert(
+            out_of_scope[0].error is not None and out_of_scope[0].text is None,
+            "a handle outside the connection's scope is refused",
+        )
+
+        # A handle minted against different content must be rejected, not silently mis-sliced.
+        forged = encode_handle(ids["page_pointers"], 0, 20, "content that never existed")
+        stale_result = await service.expand_snippets([forged], scope.allowed_notebook_ids)
+        _assert(
+            stale_result[0].error is not None and "changed" in stale_result[0].error,
+            "a handle with a stale content checksum reports the page changed",
+        )
+
+        garbage = await service.expand_snippets(["!!!not-a-handle!!!"], scope.allowed_notebook_ids)
+        _assert(garbage[0].error is not None, "a malformed handle returns an error, not an exception")
+
+        batch = await service.expand_snippets(
+            [pointer.snippet_id, "!!!bad!!!"], scope.allowed_notebook_ids
+        )
+        _assert(len(batch) == 2, "batch returns one entry per requested id")
+        _assert(batch[0].error is None and batch[1].error is not None, "batch preserves request order")
 
     # 5. get_with_context — the previously buggy method, now fixed.
     async with AsyncSessionLocal() as session:
