@@ -21,6 +21,7 @@ mounted. See plans/mcp-oauth-web-clients.md.
 from __future__ import annotations
 
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.auth.providers.workos import AuthKitProvider
 
 from app.core.config import settings
@@ -98,9 +99,23 @@ def build_mcp_auth() -> AuthProvider:
     # [VERIFY in Phase-0 spike] that the PRM is fetchable where claude.ai probes
     # (root `/.well-known/oauth-protected-resource` and any /mcp-suffixed variant)
     # given the outer Starlette mount at /mcp — a misplaced PRM 404s the web flow.
+    # AuthKit mints `aud` as whatever Resource Indicator the client asked for, and
+    # clients disagree about the trailing slash: FastMCP always advertises the
+    # slashed form, while ChatGPT normalizes it away and requests the bare one.
+    # Supplying the verifier ourselves turns off FastMCP's single-audience
+    # auto-binding so both spellings of this one server validate. Both must also
+    # be registered as Resource Indicators in the WorkOS dashboard — AuthKit
+    # rejects an unregistered one with `invalid_target` before we ever see it.
+    resource_url = str(settings.MCP_SERVER_URL).rstrip("/")
     authkit = OneNoteAuthKitProvider(
         authkit_domain=authkit_domain,
         base_url=settings.MCP_SERVER_URL,
         resource_name="OneNote MCP",
+        token_verifier=JWTVerifier(
+            jwks_uri=f"{authkit_domain.rstrip('/')}/oauth2/jwks",
+            issuer=authkit_domain.rstrip("/"),
+            algorithm="RS256",
+            audience=[resource_url, f"{resource_url}/"],
+        ),
     )
     return MultiAuth(server=authkit, verifiers=[onmcp_verifier])
