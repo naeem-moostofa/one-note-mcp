@@ -20,12 +20,12 @@ mcp = FastMCP(
     auth=build_mcp_auth(),
     instructions=(
         "Read-only access to a user's OneNote notebooks. "
-        "Use `onenote_list_notebooks` first to discover notebook IDs, then "
-        "use `onenote_search_pages` as the primary way to gather context. "
-        "Prefer several targeted or alternate search queries, and increase "
-        "`search_size`, `max_pages`, or `max_snippets_per_page` when useful, "
-        "before reading full pages. Use `onenote_get_page` sparingly only after "
-        "search snippets identify a specific page whose full content is needed."
+        "Call `onenote_search` with natural content words — it searches every "
+        "notebook the user has enabled. It "
+        "returns many short snippets: read them, pick the relevant ones, and "
+        "call `onenote_expand_snippets` with their `snippet_id`s to get more "
+        "context. Expand rather than re-searching when you have already found "
+        "the right page/general area; do not keep searching if you have enough context."
     ),
 )
 mcp.add_middleware(MCPToolCallLoggingMiddleware())

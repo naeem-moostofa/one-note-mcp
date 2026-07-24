@@ -21,7 +21,6 @@ _MANUAL_JOB_PRIORITY = 100
 from app.schemas import (
     NotebookFilter,
     NotebookResponse,
-    NotebookSummary,
     NotebookUpdate,
     NotebookWebResponse,
     PaginatedResponse,
@@ -45,20 +44,6 @@ class NotebookService:
             last_synced_at=notebook.last_synced_at,
             last_modified_datetime=notebook.last_modified_datetime,
         )
-
-    async def list_enabled_summaries(
-        self,
-        user_id: int,
-        filter_notebook_ids: list[int] | None = None,
-    ) -> list[NotebookSummary]:
-        """MCP-scoped: sync-enabled notebooks only, optionally narrowed to filter_notebook_ids."""
-        notebooks = await self._notebook_repo.list_by_user(user_id)
-        allowed = set(filter_notebook_ids) if filter_notebook_ids is not None else None
-        return [
-            NotebookSummary(id=notebook.id, display_name=notebook.display_name)
-            for notebook in notebooks
-            if notebook.sync_enabled and (allowed is None or notebook.id in allowed)
-        ]
 
     async def list_for_user(
         self, user_id: int, filters: NotebookFilter

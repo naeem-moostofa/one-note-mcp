@@ -12,9 +12,6 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import ToolResult
 
 
-_OMIT_RESULTS_FOR = {"onenote_get_page"}
-
-
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
@@ -89,13 +86,8 @@ class MCPToolCallLoggingMiddleware(Middleware):
                     if isinstance(semantic_result, list)
                     else int(semantic_result is not None)
                 ),
+                result=semantic_result,
             )
-
-            if context.message.name in _OMIT_RESULTS_FOR:
-                event["result_omitted"] = True
-            else:
-                event["result"] = semantic_result
-
             _emit(event, "info")
         except Exception:
             _emit(

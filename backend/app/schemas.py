@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Generic, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from app.models import (
     MicrosoftConnectionStatus,
@@ -261,25 +261,24 @@ class PageSearchQuery(BaseModel):
 # --- Search service schemas ---
 
 class PageFTSHit(BaseModel):
-    """Single FTS match returned by PageRepository.search_fts."""
+    """A page id with its full-text-search rank."""
     page_id: int
     rank: float
-    content: str
 
 
 class PageTrgmHit(BaseModel):
-    """Single trigram fuzzy match returned by PageRepository.search_trgm."""
+    """A page id with its trigram similarity score."""
     page_id: int
     score: float  # max word_similarity across the matched terms
-    content: str
 
 
 class PageWithPath(BaseModel):
-    """Path + staleness metadata used to build SearchHit responses."""
+    """A page's content and notebook/section path, with the sync status of both."""
     model_config = ConfigDict(from_attributes=True)
 
     page_id: int
     page_title: Optional[str] = None
+    content: Optional[str] = None
     section_name: str
     notebook_id: int
     notebook_name: str
@@ -288,25 +287,38 @@ class PageWithPath(BaseModel):
 
 
 class SearchSnippet(BaseModel):
-    """A character window of `pages.content` around one or more match offsets."""
-    text: str
+    """A passage of page text, with the coordinates it was cut from.
 
+    `snippet_id` encodes those coordinates, so nothing is stored server-side.
+    `text` is None when `error` is set.
+    """
+    snippet_id: str
+    page: str  # breadcrumb: "CS241(1) > Week 5 > Module 5 Part 1"
+    text: Optional[str] = None
+    error: Optional[str] = None
+    stale: bool = False
 
-class SearchHit(BaseModel):
-    """One page in the SearchService.search result list."""
-    page_id: int
-    page_title: Optional[str] = None
-    section_name: str
-    notebook_name: str
-    snippets: list[SearchSnippet]
-    stale: bool
+    @model_serializer
+    def _serialize(self) -> dict[str, object]:
+        """Emit only the fields that carry information.
+
+        Repeating `"error":null,"stale":false` on every snippet is pure overhead.
+        `stale` still ships when true — silently presenting a mid-sync page's
+        partial content as complete would be a wrong answer.
+        """
+        data: dict[str, object] = {"snippet_id": self.snippet_id, "page": self.page}
+        if self.text is not None:
+            data["text"] = self.text
+        if self.error is not None:
+            data["error"] = self.error
+        if self.stale:
+            data["stale"] = True
+        return data
 
 
 class PageDetailResponse(BaseModel):
     """Single-page detail with full content and surrounding section/notebook context.
 
-    Used by the MCP `onenote_get_page` tool (which projects this to `PageContent`)
-    and intended to back any future REST endpoint that surfaces a single page.
     `notebook_last_synced_at` comes from the notebook because pages don't carry
     their own last-synced timestamp — they're synced as part of a notebook run.
     """
@@ -325,21 +337,6 @@ class PageDetailResponse(BaseModel):
 
 
 # --- MCP-layer schemas (what tools return to the calling LLM) ---
-
-
-class NotebookSummary(BaseModel):
-    """Slim notebook descriptor surfaced to MCP callers — id + name only."""
-    id: int
-    display_name: str
-
-
-class PageContent(BaseModel):
-    """Full-page response from the onenote_get_page MCP tool."""
-    page_title: Optional[str] = None
-    section_name: str
-    notebook_name: str
-    content: str
-    stale: bool
 
 
 class ResolvedMCPConnection(BaseModel):

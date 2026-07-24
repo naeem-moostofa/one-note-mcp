@@ -34,11 +34,9 @@ class PageRepository:
     async def get_with_context(self, page_id: int) -> PageDetailResponse | None:
         """Single-page lookup joined with its section and notebook.
 
-        Returns full content, the section + notebook the page belongs to, both
-        sync statuses, and the notebook's `last_synced_at` (pages don't carry
-        their own — they're synced as part of a notebook run). Consumed by the
-        MCP `onenote_get_page` tool (projected to `PageContent`) and by any
-        future REST page-detail endpoint.
+        Returns full content, both sync statuses, and the notebook's
+        `last_synced_at` — pages don't carry their own, they're synced as part
+        of a notebook run.
         """
         statement = (
             select(
@@ -105,13 +103,28 @@ class PageRepository:
             offset=data.offset,
         )
 
+    def _name_filters(
+        self,
+        notebook_name: str | None,
+        section_name: str | None,
+    ) -> list:
+        """Optional case-insensitive substring filters on notebook / section name."""
+        conditions = []
+        if notebook_name:
+            conditions.append(Notebook.display_name.ilike(f"%{notebook_name}%"))
+        if section_name:
+            conditions.append(Section.display_name.ilike(f"%{section_name}%"))
+        return conditions
+
     async def search_fts(
         self,
         notebook_ids: list[int],
         query: str,
         limit: int,
+        notebook_name: str | None = None,
+        section_name: str | None = None,
     ) -> list[PageFTSHit]:
-        """First-pass full-text search. Returns matching pages with ts_rank_cd scores and content."""
+        """Full-text search. Returns matching page ids with their ts_rank_cd scores."""
         if not query.strip() or not notebook_ids:
             return []
 
@@ -122,21 +135,20 @@ class PageRepository:
         rank = func.ts_rank_cd(Page.search_vector, ts_query)
 
         statement = (
-            select(Page.id, rank.label("rank"), Page.content)
+            select(Page.id, rank.label("rank"))
             .join(Section, Page.section_id == Section.id)
+            .join(Notebook, Section.notebook_id == Notebook.id)
             .where(
                 Section.notebook_id.in_(notebook_ids),
                 Page.search_vector.op("@@")(ts_query),
                 Page.content.isnot(None),
+                *self._name_filters(notebook_name, section_name),
             )
             .order_by(rank.desc())
             .limit(limit)
         )
         result = await self.session.execute(statement)
-        return [
-            PageFTSHit(page_id=row.id, rank=float(row.rank), content=row.content)
-            for row in result.all()
-        ]
+        return [PageFTSHit(page_id=row.id, rank=float(row.rank)) for row in result.all()]
 
     async def search_trgm(
         self,
@@ -144,6 +156,8 @@ class PageRepository:
         terms: list[str],
         threshold: float,
         limit: int,
+        notebook_name: str | None = None,
+        section_name: str | None = None,
     ) -> list[PageTrgmHit]:
         """
         Trigram fuzzy fallback. For each candidate page, scores against the
@@ -185,24 +199,23 @@ class PageRepository:
         indexed_filter = or_(*indexed_filters) if len(indexed_filters) > 1 else indexed_filters[0]
 
         statement = (
-            select(Page.id, max_sim.label("score"), Page.content)
+            select(Page.id, max_sim.label("score"))
             .join(Section, Page.section_id == Section.id)
+            .join(Notebook, Section.notebook_id == Notebook.id)
             .where(
                 Section.notebook_id.in_(notebook_ids),
                 Page.content.isnot(None),
                 indexed_filter,
+                *self._name_filters(notebook_name, section_name),
             )
             .order_by(max_sim.desc())
             .limit(limit)
         )
         result = await self.session.execute(statement)
-        return [
-            PageTrgmHit(page_id=row.id, score=float(row.score), content=row.content)
-            for row in result.all()
-        ]
+        return [PageTrgmHit(page_id=row.id, score=float(row.score)) for row in result.all()]
 
     async def get_pages_with_path(self, page_ids: list[int]) -> list[PageWithPath]:
-        """Resolve notebook + section path and per-row sync status for SearchHit assembly."""
+        """Fetch page content with its notebook + section path and both sync statuses."""
         if not page_ids:
             return []
 
@@ -210,6 +223,7 @@ class PageRepository:
             select(
                 Page.id,
                 Page.title,
+                Page.content,
                 Page.sync_status,
                 Section.display_name.label("section_name"),
                 Notebook.id.label("notebook_id"),
@@ -225,6 +239,7 @@ class PageRepository:
             PageWithPath(
                 page_id=row.id,
                 page_title=row.title,
+                content=row.content,
                 section_name=row.section_name,
                 notebook_id=row.notebook_id,
                 notebook_name=row.notebook_name,
