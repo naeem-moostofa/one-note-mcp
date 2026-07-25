@@ -20,7 +20,7 @@ mounted. See plans/mcp-oauth-web-clients.md.
 
 from __future__ import annotations
 
-from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth
+from fastmcp.server.auth import AccessToken, AuthProvider, JWTVerifier, MultiAuth
 from fastmcp.server.auth.providers.workos import AuthKitProvider
 
 from app.core.config import settings
@@ -88,7 +88,7 @@ def build_mcp_auth() -> AuthProvider:
 
     # The dashboard surfaces the domain bare (e.g. "env.authkit.app"); AuthKitProvider
     # needs a full URL for the issuer/JWKS, so default the scheme to https.
-    authkit_domain = settings.WORKOS_AUTHKIT_DOMAIN
+    authkit_domain = settings.WORKOS_AUTHKIT_DOMAIN.rstrip("/")
     if not authkit_domain.startswith(("http://", "https://")):
         authkit_domain = f"https://{authkit_domain}"
 
@@ -98,9 +98,21 @@ def build_mcp_auth() -> AuthProvider:
     # [VERIFY in Phase-0 spike] that the PRM is fetchable where claude.ai probes
     # (root `/.well-known/oauth-protected-resource` and any /mcp-suffixed variant)
     # given the outer Starlette mount at /mcp — a misplaced PRM 404s the web flow.
+    # ChatGPT strips the trailing slash off the connector URL before sending it as the
+    # RFC 8707 resource indicator, so `aud` arrives in either form. Supplying the
+    # verifier ourselves accepts both, instead of AuthKitProvider binding the single
+    # slashed URL. Both forms must also be registered as Resource Indicators in the
+    # WorkOS dashboard, or AuthKit rejects the authorize request with invalid_target.
+    resource_url = settings.MCP_SERVER_URL.rstrip("/")
     authkit = OneNoteAuthKitProvider(
         authkit_domain=authkit_domain,
         base_url=settings.MCP_SERVER_URL,
         resource_name="OneNote MCP",
+        token_verifier=JWTVerifier(
+            jwks_uri=f"{authkit_domain}/oauth2/jwks",
+            issuer=authkit_domain,
+            algorithm="RS256",
+            audience=[resource_url, f"{resource_url}/"],
+        ),
     )
     return MultiAuth(server=authkit, verifiers=[onmcp_verifier])
