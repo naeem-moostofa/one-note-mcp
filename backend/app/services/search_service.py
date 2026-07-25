@@ -12,6 +12,10 @@ Both passes rank *pages*. Content is then fetched for the survivors, cut into
 windows that are scored individually, and the whole set is flattened and sorted
 globally so the best passages win regardless of which page they came from.
 
+Query terms also matched against each page's breadcrumb count toward its
+windows' scores, so naming a notebook, section or page in the query pulls that
+part of the corpus up without hard-filtering the rest away.
+
 See `plans/mcp-toolset-redesign.md`.
 """
 
@@ -20,6 +24,7 @@ from __future__ import annotations
 import base64
 import re
 import zlib
+from difflib import SequenceMatcher
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +77,22 @@ TRGM_THRESHOLD = 0.3
 # Weight of trigram similarity relative to FTS rank when combining page scores.
 TRGM_RANK_WEIGHT = 0.5
 
+# Worth of a query term matched in a page's breadcrumb, relative to one matched
+# in the passage itself. Applied per distinct term, so a query naming both a
+# notebook and a section outscores one naming only the notebook.
+BREADCRUMB_TERM_WEIGHT = 1.0
+
+# Breadcrumb matching is looser than passage matching, since names get
+# abbreviated, spaced and mistyped. Shorter terms than this match only exactly,
+# so a chapter number never matches its neighbours ("4" must not hit "40").
+MIN_BREADCRUMB_PREFIX_LENGTH = 3
+
+# Edit-similarity floor for breadcrumb words that are not prefixes of each
+# other, and the shortest term worth comparing that way — below it, ratios are
+# too coarse to mean anything.
+BREADCRUMB_SIMILARITY_THRESHOLD = 0.8
+MIN_BREADCRUMB_SIMILARITY_LENGTH = 4
+
 # Terms that are useless as trigram probes — pure digits and very short
 # identifiers never fuzzy-match meaningfully, but each one adds a
 # word_similarity expression over full page content.
@@ -122,10 +143,12 @@ class _ScoredWindow(BaseModel):
     end: int
     distinct_terms: int
     density: float
+    breadcrumb_matches: int = 0
 
     @property
-    def sort_key(self) -> tuple[int, float]:
-        return (self.distinct_terms, self.density)
+    def sort_key(self) -> tuple[float, float]:
+        matched = self.distinct_terms + BREADCRUMB_TERM_WEIGHT * self.breadcrumb_matches
+        return (matched, self.density)
 
 
 # ---- Snippet handles ------------------------------------------------------
@@ -234,12 +257,18 @@ class SearchService:
         contents = {path.page_id: path.content for path in paths if path.content}
 
         terms = _window_terms(query)
+        breadcrumb_terms = _breadcrumb_terms(query)
         scored: list[_ScoredWindow] = []
         for page in top_pages:
             content = contents.get(page.page_id)
             if content is None:
                 continue
-            scored.extend(_score_windows(page.page_id, content, terms))
+            scored.extend(_score_windows(
+                page.page_id,
+                content,
+                terms,
+                _count_breadcrumb_matches(breadcrumb_terms, path_by_id[page.page_id]),
+            ))
 
         # Global sort: the best passages win regardless of which page they came
         # from. Page rank only decided which pages were considered at all.
@@ -342,6 +371,64 @@ def _window_terms(query: str) -> list[str]:
     return filtered or terms
 
 
+def _breadcrumb_terms(query: str) -> list[str]:
+    """Distinct query terms to match against breadcrumbs, in query order.
+
+    Keeps the single-character terms `_window_terms` drops: "Chapter 4" and
+    "Chapter 5" differ only in the digit, which is the entire signal once the
+    term is matched against a section name rather than page text.
+    """
+    terms = (match.group(0).lower() for match in _TERM_RE.finditer(query))
+    return list(dict.fromkeys(term for term in terms if term not in STOPWORDS))
+
+
+def _breadcrumb_word_matches(term: str, word: str) -> bool:
+    """Whether a query term counts as naming one word of a breadcrumb.
+
+    Prefixes cover the abbreviations ("Ch" for "Chapter") and run-together
+    course codes ("STAT 231" against a "Stat231(1)" notebook) that exact
+    matching misses. Edit similarity then covers typos and OCR drift — but
+    never for anything carrying a digit, because "STAT230" and "STAT231" are
+    one edit apart and are different courses.
+    """
+    if term == word:
+        return True
+
+    shorter, longer = sorted((term, word), key=len)
+    if len(shorter) >= MIN_BREADCRUMB_PREFIX_LENGTH and longer.startswith(shorter):
+        return True
+
+    if len(shorter) < MIN_BREADCRUMB_SIMILARITY_LENGTH:
+        return False
+    if any(character.isdigit() for character in term) or any(
+        character.isdigit() for character in word
+    ):
+        return False
+
+    # Most query terms are content words that match no breadcrumb at all, so
+    # they reach here on every page. `ratio` is the expensive one; its two
+    # documented upper bounds reject the bulk of those pairs first.
+    matcher = SequenceMatcher(None, term, word)
+    return (
+        matcher.real_quick_ratio() >= BREADCRUMB_SIMILARITY_THRESHOLD
+        and matcher.quick_ratio() >= BREADCRUMB_SIMILARITY_THRESHOLD
+        and matcher.ratio() >= BREADCRUMB_SIMILARITY_THRESHOLD
+    )
+
+
+def _count_breadcrumb_matches(terms: list[str], path: PageWithPath) -> int:
+    """How many of `terms` match a word in a page's breadcrumb."""
+    if not terms:
+        return 0
+    words = {match.group(0).lower() for match in _TERM_RE.finditer(_breadcrumb(path))}
+    return sum(
+        1 for term in terms
+        # Exact hits are the common case and settle in one lookup; only terms
+        # that miss outright are worth comparing word by word.
+        if term in words or any(_breadcrumb_word_matches(term, word) for word in words)
+    )
+
+
 def _fallback_terms(query: str) -> list[str]:
     """The longest few terms worth probing with trigram similarity.
 
@@ -377,11 +464,20 @@ def _merge_ranked(
     return list(by_id.values())
 
 
-def _score_windows(page_id: int, content: str, terms: list[str]) -> list[_ScoredWindow]:
+def _score_windows(
+    page_id: int,
+    content: str,
+    terms: list[str],
+    breadcrumb_matches: int = 0,
+) -> list[_ScoredWindow]:
     """Cut and score one window around every match on a page.
 
     Windows overlap freely — near-duplicates are resolved during selection,
     once the global ranking has decided which of them the model actually sees.
+
+    `breadcrumb_matches` is a per-page constant carried onto every window, so a
+    page whose location the query named outranks an equally dense passage
+    elsewhere.
     """
     if not content or not terms:
         return []
@@ -411,6 +507,7 @@ def _score_windows(page_id: int, content: str, terms: list[str]) -> list[_Scored
                 end=window_end,
                 distinct_terms=sum(1 for other in lowered_terms if other in fragment),
                 density=matches / max(window_end - window_start, 1),
+                breadcrumb_matches=breadcrumb_matches,
             ))
             start = match_index + len(needle)
 

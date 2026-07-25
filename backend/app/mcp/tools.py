@@ -44,9 +44,9 @@ async def onenote_search(
     Searches every notebook the user has enabled by default. Note content mixes typed text with best-effort OCR of handwriting and images, so expect recognition errors; search tolerates them via fuzzy matching.
 
     Parameters:
-    - query (str, required): natural content words. Supports phrase quoting (`"exact phrase"`) and exclusion (`-term`). Common filler words are ignored.
-    - notebook (str, optional): limit to notebooks whose name contains this, e.g. "CS241".
-    - section (str, optional): limit to sections whose name contains this, e.g. "Week 3".
+    - query (str, required): natural content words, plus any notebook, section or page names you know. A query term matching a page's "Notebook > Section > Page" breadcrumb ranks that page higher, so "STAT231 Chapter 4 confidence interval" beats a bare "confidence interval" when you know where to look. Names match loosely — spacing, abbreviations and small misspellings are tolerated ("STAT 231" and "Ch" both land) — but digits must be exact, since "Chapter 4" and "Chapter 5" are told apart by the number alone. Supports phrase quoting (`"exact phrase"`) and exclusion (`-term`). Common filler words are ignored.
+    - notebook (str, optional): hard filter — drops every notebook whose name does not contain this, e.g. "CS241". Naming the notebook in `query` instead only boosts it, which is the better choice when you are not certain the answer lives there.
+    - section (str, optional): hard filter on section name, e.g. "Week 3". Same trade-off as `notebook`.
 
     Each snippet carries a `page` breadcrumb ("Notebook > Section > Page"). `stale: true` means that page is mid-sync and its content may be incomplete.
     """

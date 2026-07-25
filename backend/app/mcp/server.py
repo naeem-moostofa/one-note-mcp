@@ -21,7 +21,10 @@ mcp = FastMCP(
     instructions=(
         "Read-only access to a user's OneNote notebooks. "
         "Call `onenote_search` with natural content words — it searches every "
-        "notebook the user has enabled. It "
+        "notebook the user has enabled. Include the notebook, section or page "
+        "name in the query whenever you know it: matching a page's breadcrumb "
+        "ranks it higher, which is what keeps an unrelated notebook out of the "
+        "results. It "
         "returns many short snippets: read them, pick the relevant ones, and "
         "call `onenote_expand_snippets` with their `snippet_id`s to get more "
         "context. Expand rather than re-searching when you have already found "
